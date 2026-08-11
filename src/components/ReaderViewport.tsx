@@ -227,7 +227,7 @@ export default function ReaderViewport() {
               <p className="text-lg font-medium text-[var(--text)] opacity-50">Open a PDF to start reading</p>
               <p className="mt-1 text-sm text-[var(--text)] opacity-30">Ctrl+O or drag & drop a PDF file</p>
               {error && <p className="mt-2 text-sm text-red-400">{error}</p>}
-              <button onClick={handleOpenFile} className="mt-4 rounded-lg bg-[var(--color-accent)] px-5 py-2.5 text-sm font-medium text-white transition-opacity hover:opacity-90">
+              <button onClick={handleOpenFile} className="mt-4 rounded-lg bg-[var(--color-accent)] px-8 py-3 text-sm font-medium text-white transition-opacity hover:opacity-90">
                 Open a PDF File
               </button>
             </>

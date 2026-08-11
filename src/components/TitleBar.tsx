@@ -63,7 +63,7 @@ export default function TitleBar() {
             <button
               key={t}
               onClick={() => setTheme(t)}
-              className={`flex items-center gap-1 rounded px-2 py-1 text-xs transition-colors ${
+              className={`flex items-center gap-1.5 rounded px-3 py-1 text-xs transition-colors ${
                 theme === t
                   ? 'bg-[var(--color-accent)] text-white'
                   : 'text-[var(--text)] opacity-50 hover:bg-[var(--border)]/30 hover:opacity-80'
