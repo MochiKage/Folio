@@ -1,0 +1,147 @@
+@import "tailwindcss";
+
+@theme {
+  --color-reader-bg: #ffffff;
+  --color-reader-surface: #f8f9fa;
+  --color-reader-text: #1a1a2e;
+  --color-reader-border: #e2e4e9;
+  --color-accent: #2563eb;
+
+  --color-parchment-bg: #f5f0e8;
+  --color-parchment-surface: #ede4d3;
+  --color-parchment-text: #3d322b;
+  --color-parchment-border: #d4c5b2;
+}
+
+:root {
+  --bg: var(--color-reader-bg);
+  --surface: var(--color-reader-surface);
+  --text: var(--color-reader-text);
+  --border: var(--color-reader-border);
+}
+
+:root.theme-dark {
+  --bg: #1a1a2e;
+  --surface: #16213e;
+  --text: #e0e0e0;
+  --border: #2a2a4a;
+}
+
+:root.theme-parchment {
+  --bg: var(--color-parchment-bg);
+  --surface: var(--color-parchment-surface);
+  --text: var(--color-parchment-text);
+  --border: var(--color-parchment-border);
+}
+
+/* Prevent white flash on resize — set default bg before CSS vars load */
+html {
+  background-color: #f8f9fa;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  background-color: var(--bg);
+  color: var(--text);
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  overflow: hidden;
+  height: 100vh;
+  width: 100vw;
+}
+
+#root {
+  height: 100vh;
+  width: 100vw;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--bg);
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #888;
+}
+
+/* ─── PDF.js Text Layer ─────────────────────────── */
+/* Based on PDF.js official viewer CSS — critical for correct text positioning */
+.pdf-text-layer {
+  position: absolute;
+  text-align: initial;
+  inset: 0;
+  overflow: hidden;
+  opacity: 1;
+  line-height: 1;
+  z-index: 2;
+  /* Prevent browser from adjusting text size — key for alignment */
+  text-size-adjust: none;
+  forced-color-adjust: none;
+  pointer-events: auto;
+}
+
+/* Text spans — invisible by default, positioned by PDF.js via CSS transform */
+.pdf-text-layer span {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+  text-size-adjust: none;
+  /* Precise font rendering for accurate hit-testing */
+  text-rendering: geometricPrecision;
+  -webkit-font-smoothing: antialiased;
+}
+
+.pdf-text-layer br {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+}
+
+/* Highlighted text (search results / TTS sync) */
+.pdf-text-layer .highlight {
+  margin: -1px;
+  padding: 1px;
+  background-color: rgba(180, 0, 170, 1);
+  border-radius: 4px;
+}
+
+.pdf-text-layer .highlight.selected {
+  background-color: rgba(0, 100, 0, 1);
+}
+
+/* Text selection — show selection highlight on transparent text */
+.pdf-text-layer ::selection {
+  background: rgba(0, 0, 255, 0.3);
+}
+
+/* ─── Performance ────────────────────────────────── */
+/* Lazy loading handled by IntersectionObserver — off-screen pages don't mount */
+.pdf-page {
+  /* No contain — let text layer spans position freely */
+}
+
+.reader-container {
+  overflow-anchor: none;
+}
+
+/* Smooth sidebar open/close → Fit Width recalculates smoothly */
+.reader-container > div {
+  transition: transform 0.2s ease-out;
+}
