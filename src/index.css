@@ -104,6 +104,27 @@ body {
   /* Precise font rendering for accurate hit-testing */
   text-rendering: geometricPrecision;
   -webkit-font-smoothing: antialiased;
+
+  /*
+   * Scale the font to the current zoom level.
+   * --total-scale-factor is set inline by PdfPage.tsx on the container.
+   * --font-height is set inline by PDF.js TextLayer on each span.
+   *
+   * scaleX(--scale-x) corrects for the difference between PDF-computed
+   * glyph widths and the browser's actual font rendering — without this
+   * horizontal correction, cumulative width errors break text selection.
+   *
+   * line-height: 1 keeps each span's hit-test area tight to the glyph
+   * bounding box.  overflow: hidden prevents text from visually bleeding
+   * into adjacent columns (does NOT prevent browser selection from crossing
+   * columns — that is a fundamental limitation of DOM-based text selection
+   * with absolutely positioned elements).
+   */
+  --font-height: 0;
+  font-size: calc(var(--total-scale-factor) * var(--font-height));
+  line-height: 1;
+  overflow: hidden;
+  transform: scaleX(var(--scale-x, 1)) rotate(var(--rotate, 0deg));
 }
 
 .pdf-text-layer br {
@@ -129,6 +150,37 @@ body {
 /* Text selection — show selection highlight on transparent text */
 .pdf-text-layer ::selection {
   background: rgba(0, 0, 255, 0.3);
+}
+
+/* OCR placeholder — shown on scanned pages with no embedded text */
+.pdf-text-layer .ocr-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: rgba(128, 128, 128, 0.6);
+  font-size: 13px;
+  font-style: italic;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* OCR-generated spans and lines — positioned by app code, not PDF.js */
+.pdf-text-layer .ocr-line {
+  position: absolute;
+  pointer-events: auto;
+  line-height: 1;
+}
+
+.pdf-text-layer .ocr-span {
+  color: transparent;
+  white-space: pre;
+  cursor: text;
+  line-height: 1;
+  overflow: hidden;
+  transform-origin: 0% 50%;
+  text-size-adjust: none;
+  vertical-align: baseline;
 }
 
 /* ─── Performance ────────────────────────────────── */

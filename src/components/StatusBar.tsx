@@ -1,5 +1,6 @@
 import { useAppStore } from '../stores/appStore'
 import { usePdfStore } from '../stores/pdfStore'
+import { useOcrStore } from '../stores/ocrStore'
 
 const presets = [
   { label: 'Fit',  zoom: -1 },
@@ -10,6 +11,13 @@ const presets = [
   { label: '400%', zoom: 4.0 },
 ]
 
+const ocrStatusLabels: Record<string, string> = {
+  idle: '',
+  loading: 'OCR…',
+  done: 'OCR ✓',
+  error: 'OCR ✗',
+}
+
 export default function StatusBar() {
   const { focusMode } = useAppStore()
   const activePage = usePdfStore((s) => s.activePage)
@@ -18,6 +26,12 @@ export default function StatusBar() {
   const activeDoc = usePdfStore((s) =>
     s.documents.find((d) => d.id === s.activeDocId)
   )
+  const forceOcr = useOcrStore((s) => s.forceOcr)
+  const toggleForceOcr = useOcrStore((s) => s.toggleForceOcr)
+  const pageOcrStatus = useOcrStore((s) => {
+    if (!activeDoc) return 'idle'
+    return s.statuses[`${activeDoc.id}:${activePage}`] ?? 'idle'
+  })
 
   if (focusMode) return null
 
@@ -34,7 +48,37 @@ export default function StatusBar() {
 
   return (
     <footer className="flex h-7 shrink-0 items-center justify-between border-t border-[var(--border)] bg-[var(--surface)] px-3 text-xs text-[var(--text)]/50">
-      <span>{activeDoc?.name ?? 'Ready'}</span>
+      <div className="flex items-center gap-3">
+        <span>{activeDoc?.name ?? 'Ready'}</span>
+        {/* OCR status */}
+        {pageOcrStatus !== 'idle' && (
+          <span
+            className={`tabular-nums ${
+              pageOcrStatus === 'loading'
+                ? 'text-[var(--color-accent)] animate-pulse'
+                : pageOcrStatus === 'done'
+                  ? 'text-green-500'
+                  : 'text-red-400'
+            }`}
+          >
+            {ocrStatusLabels[pageOcrStatus]}
+          </span>
+        )}
+        {/* Force OCR toggle */}
+        {activeDoc && (
+          <button
+            onClick={toggleForceOcr}
+            className={`rounded px-1.5 py-0.5 text-[10px] transition-colors ${
+              forceOcr
+                ? 'bg-[var(--color-accent)]/10 font-medium text-[var(--color-accent)]'
+                : 'hover:bg-[var(--border)]/30 hover:text-[var(--text)]/70 text-[var(--text)]/30'
+            }`}
+            title="Toggle OCR mode — use PDF text coordinates to render selectable text layer"
+          >
+            OCR
+          </button>
+        )}
+      </div>
 
       {/* Zoom slider bar */}
       <div className="flex items-center gap-2">

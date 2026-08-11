@@ -154,3 +154,61 @@ export function getDocumentTags(documentId: string): Promise<Tag[]> {
 export function searchDocumentsByTags(tagIds: string[]): Promise<string[]> {
   return invoke('search_documents_by_tags', { tagIds })
 }
+
+// ─── OCR ───────────────────────────────────────────
+export interface OcrBox {
+  text: string
+  x0: number
+  y0: number
+  x1: number
+  y1: number
+  confidence: number
+}
+
+export interface OcrPageData {
+  document_id: string
+  page: number
+  text: string
+  confidence: number
+  boxes: OcrBox[]
+}
+
+export function getOcrResult(
+  docId: string,
+  page: number
+): Promise<OcrPageData | null> {
+  return invoke('get_ocr_result', { docId, page })
+}
+
+export function runOcr(
+  docId: string,
+  page: number,
+  image: number[],
+  dpi: number,
+  imageHeight: number,
+  viewBox: [number, number, number, number]
+): Promise<OcrPageData> {
+  return invoke('run_ocr', {
+    docId,
+    page,
+    image,
+    dpi,
+    imageHeight,
+    viewBox,
+  })
+}
+
+export function deleteOcrResult(
+  docId: string,
+  page: number
+): Promise<void> {
+  return invoke('delete_ocr_result', { docId, page })
+}
+
+export function ocrModelStatus(): Promise<{
+  det: string
+  rec: string
+  ready: boolean
+}> {
+  return invoke('ocr_model_status')
+}

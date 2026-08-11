@@ -19,6 +19,7 @@ impl Database {
             conn: Mutex::new(conn),
         };
         db.initialize_schema()?;
+        db.run_migrations()?;
         Ok(db)
     }
 
@@ -102,6 +103,7 @@ impl Database {
                 page INTEGER NOT NULL,
                 text TEXT,
                 confidence REAL,
+                boxes TEXT DEFAULT '[]',
                 created_at TEXT DEFAULT (datetime('now')),
                 PRIMARY KEY (document_id, page)
             );
@@ -137,6 +139,23 @@ impl Database {
                 ON document_tags(tag_id);
             "
         )?;
+        Ok(())
+    }
+
+    fn run_migrations(&self) -> SqliteResult<()> {
+        let conn = self.conn.lock().unwrap();
+
+        // Migration: add boxes column to ocr_cache if missing
+        let has_boxes_col: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('ocr_cache') WHERE name = 'boxes'")?
+            .exists([])?;
+        if !has_boxes_col {
+            conn.execute(
+                "ALTER TABLE ocr_cache ADD COLUMN boxes TEXT DEFAULT '[]'",
+                [],
+            )?;
+        }
+
         Ok(())
     }
 }

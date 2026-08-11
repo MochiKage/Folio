@@ -18,7 +18,7 @@ export default function ReaderViewport() {
 
   const focusMode = useAppStore((s) => s.focusMode)
   const toggleFocusMode = useAppStore((s) => s.toggleFocusMode)
-  const { activePage, zoom, rotation, setPage, setZoom, addDocument } = usePdfStore()
+  const { activePage, zoom, rotation, setPage, setZoom, addDocument, activeDocId } = usePdfStore()
   const { pdfDoc, loading, error, loadPdfFromPath } = usePdfLoader()
 
   // Page dimensions for fit-width / fit-page calculations
@@ -277,6 +277,7 @@ export default function ReaderViewport() {
                   pdfDoc={pdfDoc}
                   zoom={effectiveZoom}
                   rotation={rotation}
+                  documentId={activeDocId}
                   onHeight={(h) => setPageHeights((prev) => new Map(prev).set(pageNum, h))}
                 />
               ) : (
@@ -292,12 +293,13 @@ export default function ReaderViewport() {
 
 // ─── Memoized per-page loader ───
 const PdfPageLazy = memo(function PdfPageLazy({
-  pageNum, pdfDoc, zoom, rotation, onHeight,
+  pageNum, pdfDoc, zoom, rotation, documentId, onHeight,
 }: {
   pageNum: number
   pdfDoc: PDFDocumentProxy
   zoom: number
   rotation: number
+  documentId: string | null
   onHeight: (h: number) => void
 }) {
   const [pageProxy, setPageProxy] = useState<Awaited<ReturnType<typeof pdfDoc.getPage>> | null>(null)
@@ -318,5 +320,5 @@ const PdfPageLazy = memo(function PdfPageLazy({
     return <div className="flex items-center justify-center text-xs text-[var(--text)] opacity-10" style={{ height: 600 }}>...</div>
   }
 
-  return <PdfPage page={pageProxy} pageNumber={pageNum} zoom={zoom} rotation={rotation} />
+  return <PdfPage page={pageProxy} pageNumber={pageNum} zoom={zoom} rotation={rotation} documentId={documentId} />
 })

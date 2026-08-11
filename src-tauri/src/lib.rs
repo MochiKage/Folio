@@ -54,6 +54,11 @@ pub fn run() {
             commands::tags::remove_document_tag,
             commands::tags::get_document_tags,
             commands::tags::search_documents_by_tags,
+            // OCR
+            commands::ocr::get_ocr_result,
+            commands::ocr::run_ocr,
+            commands::ocr::delete_ocr_result,
+            commands::ocr::ocr_model_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
