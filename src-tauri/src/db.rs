@@ -9,7 +9,7 @@ pub struct Database {
 impl Database {
     pub fn new(app_dir: PathBuf) -> SqliteResult<Self> {
         std::fs::create_dir_all(&app_dir).ok();
-        let db_path = app_dir.join("phrases.db");
+        let db_path = app_dir.join("folio.db");
         let conn = Connection::open(db_path)?;
 
         // Enable WAL mode for better concurrent reads

@@ -1,8 +1,8 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "Phrases",
+  "productName": "Folio",
   "version": "0.1.0",
-  "identifier": "com.tauri.dev",
+  "identifier": "com.folio.reader",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Phrases",
+        "title": "Folio",
         "width": 1280,
         "height": 800,
         "minWidth": 800,

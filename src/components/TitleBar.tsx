@@ -34,9 +34,9 @@ export default function TitleBar() {
         >
           <Sidebar size={16} />
         </button>
-        <span className="ml-1 text-sm font-semibold tracking-wide text-[var(--text)]">Phrases</span>
+        <span className="ml-1 text-sm font-semibold tracking-wide text-[var(--text)]">Folio</span>
 
-        {/* Tab buttons — right next to Phrases */}
+        {/* Tab buttons — right next to Folio */}
         <div className="mx-1.5 h-4 w-px bg-[var(--border)]" />
         {tabs.map(({ id, label, icon: Icon }) => (
           <button

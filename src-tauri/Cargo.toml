@@ -1,8 +1,8 @@
 [package]
-name = "app"
+name = "folio"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "A specialized PDF reader for English academic literature"
+authors = ["MochiKage"]
 license = ""
 repository = ""
 edition = "2021"
