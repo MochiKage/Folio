@@ -155,6 +155,91 @@ export function searchDocumentsByTags(tagIds: string[]): Promise<string[]> {
   return invoke('search_documents_by_tags', { tagIds })
 }
 
+// ─── Dictionary ────────────────────────────────────
+export interface DictEntry {
+  word: string
+  phonetic: string | null
+  definition_en: string
+  translation_zh: string
+  tags: string | null
+  /** Which dictionary matched this entry */
+  source_dict_id: string
+  source_dict_name: string
+}
+
+export function lookupWord(word: string): Promise<DictEntry | null> {
+  return invoke('lookup_word', { word })
+}
+
+/** Metadata about an installed dictionary. */
+export interface DictionaryMeta {
+  id: string
+  name: string
+  source_lang: string
+  target_lang: string
+  format: string
+  file_path: string
+  enabled: boolean
+  priority: number
+  entry_count: number
+  is_builtin: boolean
+  created_at: string | null
+  updated_at: string | null
+}
+
+export interface ValidationError {
+  field: string
+  message: string
+}
+
+export interface ValidationResult {
+  valid: boolean
+  errors: ValidationError[]
+  warnings: string[]
+  entry_count: number | null
+  sample_columns: string[]
+}
+
+export function listDictionaries(): Promise<DictionaryMeta[]> {
+  return invoke('list_dictionaries')
+}
+
+export function validateDictionary(
+  filePath: string,
+  format: string
+): Promise<ValidationResult> {
+  return invoke('validate_dictionary', { filePath, format })
+}
+
+export function addDictionary(meta: DictionaryMeta): Promise<void> {
+  return invoke('add_dictionary', { meta })
+}
+
+export function removeDictionary(dictId: string): Promise<void> {
+  return invoke('remove_dictionary', { dictId })
+}
+
+export function toggleDictionary(
+  dictId: string,
+  enabled: boolean
+): Promise<void> {
+  return invoke('toggle_dictionary', { dictId, enabled })
+}
+
+export function reorderDictionary(
+  dictId: string,
+  newPriority: number
+): Promise<void> {
+  return invoke('reorder_dictionary', { dictId, newPriority })
+}
+
+export function renameDictionary(
+  dictId: string,
+  newName: string
+): Promise<void> {
+  return invoke('rename_dictionary', { dictId, newName })
+}
+
 // ─── OCR ───────────────────────────────────────────
 export interface OcrBox {
   text: string

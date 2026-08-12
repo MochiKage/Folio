@@ -48,6 +48,47 @@ const PdfPage = memo(function PdfPage({
     (s) => (documentId ? s.byPage[`${documentId}:${pageNumber}`] : undefined) ?? EMPTY_ANNOTATIONS,
   )
 
+  /**
+   * Find the full text of the span at a given position in the text layer.
+   *
+   * PDF.js text-layer spans are absolutely positioned with inline `left`
+   * and `top` styles in page-local coordinates.  Their `textContent` always
+   * carries the complete text of that run regardless of browser font-rendering
+   * quirks — so using it for word lookup is more reliable than relying on the
+   * DOM selection (which can miss edge characters when the glyph extends past
+   * the font-metric advance width).
+   *
+   * Returns the span's textContent if a span is found near (vx, vy), or null.
+   */
+  const getWordAtPosition = useCallback(
+    (vx: number, vy: number): string | null => {
+      const div = textLayerRef.current
+      if (!div) return null
+
+      const spans = div.querySelectorAll('span')
+      for (const span of spans) {
+        const el = span as HTMLElement
+        const left = parseFloat(el.style.left) || 0
+        const top = parseFloat(el.style.top) || 0
+        const rect = el.getBoundingClientRect()
+
+        // Right tolerance: +5 px accounts for the glyph-overhang problem
+        // (the original "astrophysics → astrophysic" bug).
+        if (
+          rect.width > 0 &&
+          vx >= left - 2 &&
+          vx <= left + rect.width + 5 &&
+          vy >= top - 1 &&
+          vy <= top + rect.height + 1
+        ) {
+          return (el.textContent || '').trim()
+        }
+      }
+      return null
+    },
+    [],
+  )
+
   /** Find highlight annotations that overlap a PDF-space point or rect */
   const findOverlappingHighlights = useCallback(
     (target: [number, number, number, number]) => {
@@ -76,6 +117,14 @@ const PdfPage = memo(function PdfPage({
       if (!pageEl) return
 
       const viewport = viewportRef.current
+      const pageRect = pageEl.getBoundingClientRect()
+
+      // Viewport-local coords of the click (relative to page element)
+      const vx = e.clientX - pageRect.left
+      const vy = e.clientY - pageRect.top
+
+      // Exact word at the click position, from the PDF text span
+      const clickedWord = getWordAtPosition(vx, vy) || ''
 
       const rects = selectionToPdfRects(selection, pageEl, viewport)
       const merged = mergeRects(rects.map((r) => r.rect))
@@ -86,12 +135,13 @@ const PdfPage = memo(function PdfPage({
         x: e.clientX,
         y: e.clientY,
         selectedText: selection.toString().trim().slice(0, 500),
+        clickedWord,
         pageNumber,
         pdfRect: merged,
         overlappingAnnIds: overlapping.map((a) => a.id),
       })
     },
-    [pageNumber, showContextMenu, findOverlappingHighlights],
+    [pageNumber, showContextMenu, findOverlappingHighlights, getWordAtPosition],
   )
 
   // Handle double-click on text layer → if over a highlight, select it and show actions
@@ -132,6 +182,7 @@ const PdfPage = memo(function PdfPage({
         x: e.clientX,
         y: e.clientY,
         selectedText: contents.join('; ') || '(highlight)',
+        clickedWord: '',
         pageNumber,
         pdfRect: merged,
         overlappingAnnIds: overlapping.map((a) => a.id),

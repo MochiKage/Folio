@@ -15,6 +15,9 @@ dist-ssr
 # Tauri
 src-tauri/target
 
+# Large dictionary files — not tracked in git
+src-tauri/resources/stardict.db
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

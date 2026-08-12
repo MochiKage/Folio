@@ -5,6 +5,10 @@ export interface ContextMenuState {
   x: number
   y: number
   selectedText: string
+  /** Exact word at the click position, read directly from the PDF text
+   *  span's textContent.  More reliable than extracting from selectedText
+   *  when the browser selection misses edge characters. */
+  clickedWord: string
   pageNumber: number
   /** PDF-space bounding box for the selection (merged from client rects) */
   pdfRect: [number, number, number, number] | null
@@ -15,6 +19,7 @@ export interface ContextMenuState {
     x: number
     y: number
     selectedText: string
+    clickedWord?: string
     pageNumber: number
     pdfRect: [number, number, number, number] | null
     overlappingAnnIds?: string[]
@@ -27,10 +32,11 @@ export const useContextMenuStore = create<ContextMenuState>((set) => ({
   x: 0,
   y: 0,
   selectedText: '',
+  clickedWord: '',
   pageNumber: 1,
   pdfRect: null,
   overlappingAnnIds: [],
 
-  show: (opts) => set({ ...opts, visible: true }),
+  show: (opts) => set({ clickedWord: '', ...opts, visible: true }),
   hide: () => set({ visible: false }),
 }))

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use tauri::State;
+use rusqlite::OptionalExtension;
 use crate::db::Database;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -49,16 +50,49 @@ pub fn get_vocabulary(db: State<Database>) -> Result<Vec<VocabWord>, String> {
 #[tauri::command]
 pub fn add_vocabulary(db: State<Database>, word: VocabWord) -> Result<(), String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    conn.execute(
-        "INSERT OR REPLACE INTO vocabulary (id, word, phonetic, definition, sentence, source_doc_id, source_page, tags, review_count, last_review_at, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, datetime('now'))",
-        rusqlite::params![
-            word.id, word.word, word.phonetic, word.definition,
-            word.sentence, word.source_doc_id, word.source_page,
-            word.tags, word.review_count, word.last_review_at
-        ],
-    )
-    .map_err(|e| e.to_string())?;
+
+    // Check if this word already exists (case-insensitive)
+    let existing_id: Option<String> = conn
+        .query_row(
+            "SELECT id FROM vocabulary WHERE lower(word) = lower(?1) LIMIT 1",
+            rusqlite::params![word.word],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+
+    if let Some(existing_id) = existing_id {
+        // Update existing word — preserve review_count unless the new value is higher
+        conn.execute(
+            "UPDATE vocabulary SET
+               phonetic = COALESCE(?2, phonetic),
+               definition = CASE WHEN ?3 != '{}' THEN ?3 ELSE definition END,
+               sentence = COALESCE(?4, sentence),
+               source_doc_id = COALESCE(?5, source_doc_id),
+               source_page = COALESCE(?6, source_page),
+               tags = CASE WHEN ?7 != '[]' THEN ?7 ELSE tags END,
+               updated_at = datetime('now')
+             WHERE id = ?1",
+            rusqlite::params![
+                existing_id, word.phonetic, word.definition,
+                word.sentence, word.source_doc_id, word.source_page,
+                word.tags
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+    } else {
+        // Insert new word
+        conn.execute(
+            "INSERT INTO vocabulary (id, word, phonetic, definition, sentence, source_doc_id, source_page, tags, review_count, last_review_at, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, datetime('now'))",
+            rusqlite::params![
+                word.id, word.word, word.phonetic, word.definition,
+                word.sentence, word.source_doc_id, word.source_page,
+                word.tags, word.review_count, word.last_review_at
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 

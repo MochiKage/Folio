@@ -116,6 +116,22 @@ impl Database {
                 created_at TEXT DEFAULT (datetime('now'))
             );
 
+            -- User-installed dictionaries
+            CREATE TABLE IF NOT EXISTS dictionaries (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                source_lang TEXT NOT NULL DEFAULT 'en',
+                target_lang TEXT NOT NULL DEFAULT 'zh',
+                format TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                priority INTEGER NOT NULL DEFAULT 10,
+                entry_count INTEGER DEFAULT 0,
+                is_builtin INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
+
             -- Settings
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,

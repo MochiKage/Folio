@@ -160,11 +160,138 @@ PDF 中的文字宽度是 PDF 引擎根据字体度量计算的，但浏览器�
 - `contextMenuStore` — 右键菜单状态（坐标、选中文字、PDF rect、重叠标注 ID）
 - `pdfStore` 新增 `refreshKey` + `triggerRefresh()` — 标注/书签/词汇变更后刷新侧边面板
 
+### 2026-08-12：离线词典系统 — 多词典管理 + 划词翻译 + 文本选区修复
+
+**架构总览**：实现了完整的离线词典系统，支持多词典优先级叠加、用户导入/管理、自动表名检测，同时修复了 PDF 文本层选区不精确的问题。
+
+---
+
+#### 多词典管理器
+
+**数据结构**：
+
+```
+DictionaryManager (Tauri State)
+├── BackendImpl 枚举（Ecdict | 未来: Csv | Stardict）
+│   ├── metadata(): DictionaryMeta  — 词典元信息
+│   ├── lookup(word) → DictEntry   — 3 级查词
+│   └── entry_count()
+└── 按 priority 升序遍历所有启用的后端，返回首个匹配（短路）
+```
+
+**新增数据库表** `dictionaries`：
+```sql
+id, name, source_lang, target_lang, format, file_path,
+enabled, priority, entry_count, is_builtin, created_at, updated_at
+```
+
+**Tauri 命令**（`commands/dictionary.rs`）：
+- `lookup_word` — 跨词典优先级查词
+- `list_dictionaries` / `add_dictionary` / `remove_dictionary` — 词典 CRUD
+- `toggle_dictionary` / `reorder_dictionary` / `rename_dictionary` — 管理操作
+- `validate_dictionary` — 导入前校验（表存在性、必要列、条目数、编码抽样）
+
+**状态管理**（`dictionaryStore.ts`）：Zustand store，所有操作仅需 `refresh()` / `add()` / `remove()` / `toggle()` / `reorder()` / `rename()` 几个方法，组件层代码极简。
+
+---
+
+#### 词典格式自动检测
+
+**问题**：用户导入 `stardict.db`（340 万词条），验证报错"缺少 ecdict 表"。文件表名是 `stardict` 而非 `ecdict`，但列结构完全兼容。
+
+**解决**：`EcdictBackend::open()` 自动检测表名——优先 `stardict`，回退 `ecdict`。`validate_ecdict()` 同理，且错误消息列出实际存在的表名。
+
+---
+
+#### 内置词典
+
+**策略**：内置词典从用户已有的 `stardict.db` 中提取 Collins 1-5 星 + Oxford 3000 + 中高考 CET4 词汇，共 **21,506 词条**（6.4 MB），覆盖英语阅读中最常见的单词。
+
+**搜索路径**（`lib.rs` 启动时按序搜索）：
+```
+resources/stardict.db  →  resources/ecdict.db  →  D:\Downloads\stardict.db
+```
+优先级：stardict > ecdict，dev > prod > 外置路径。内置词典不可删除，可禁用/重命名/调整优先级。
+
+---
+
+#### 划词翻译集成
+
+右键菜单（`ContextMenu.tsx`）中：
+- 选中单词后自动查词，显示音标、中文释义、英文定义、标签
+- 词典来源标注在右下角（如 "Stardict 英汉词典"）
+- 一键 "Add to Vocabulary" 将释义存入个人词库
+
+个人词库（`VocabularyPanel.tsx`）现在支持单词详情视图（音标、中英文释义、出处、复习计数、日期）。
+
+---
+
+#### 文本选区精确性修复
+
+**原始问题**：PDF 文本层 span 的宽度由 PDF 字体度量计算，但浏览器实际渲染字形（glyph）往往比度量宽度稍宽，导致：
+- 选中 "astrophysics," 时拖到 `s` 位置，浏览器选区只覆盖到 `c`（"astrophysic"）
+- CSS hack（`padding-right`、`scaleX × 1.015`）会引发不可预测的副作用（选区左移、首字母丢失）
+
+**尝试过的方案与结论**：
+
+| 方案 | 效果 | 结论 |
+|------|------|------|
+| `padding-right: 2px` | 选区左移约一个字符 | 与 `scaleX` + `overflow: hidden` 交互导致位置偏移 |
+| `scaleX × 1.015` | 首字母丢失 | transform 缩放比例与文本定位耦合，副作用不可控 |
+| **Span 坐标定位 + textContent 取词** | ✅ 精确 | 绕过浏览器选区，直接用 PDF 原始文本数据 |
+
+**最终方案**（`PdfPage.tsx` → `getWordAtPosition()`）：
+
+1. 右键点击时，遍历文本层所有 `<span>`
+2. 用 span 的 inline `left`/`top`（PDF 文本矩阵给出的精确坐标）+ `getBoundingClientRect()` 的宽高做命中检测（右侧给 5px 容差）
+3. 命中后取 `span.textContent`——该值始终完整，不受浏览器字体渲染影响
+4. 结果存入 `contextMenuStore.clickedWord`，ContextMenu 优先用它查词，回退到从 DOM 选区提取
+
+**关键洞察**：PDF.js span 的**位置信息**（left/top）是可靠的（来自 PDF 文本矩阵），只有**宽度**不可靠（受浏览器字体渲染影响）。所以用位置来定位、用 textContent 来取词——取长补短。
+
+---
+
+#### 前端词典管理面板
+
+`DictionaryManager.tsx`（侧边栏 Dictionary 标签）：
+
+- **列表视图**：每个词典显示名称、格式、语言对、条目数、状态指示灯
+- **导入流程**：文件选择器 → 格式选择（ECDICT） → 验证 → 命名 → 导入
+- **内联重命名**：悬停名称 → 铅笔图标 → 点击编辑 → Enter 保存 / Esc 取消
+- **优先级排序**：↑↓ 箭头按钮，上移 = 提高优先级（更早被搜索）
+- **启用/禁用切换**：ToggleRight/ToggleLeft 图标
+- **删除**：仅对非内置词典开放
+- 验证失败返回结构化错误（红色）+ 警告（黄色），字段级别定位
+
+---
+
+#### 修改清单
+
+| 文件 | 操作 | 说明 |
+|------|------|------|
+| `src-tauri/src/dictionary.rs` | **新增** | DictionaryManager + EcdictBackend + BackendImpl + validate_dictionary + lemma_candidates |
+| `src-tauri/src/commands/dictionary.rs` | **新增** | 7 个 Tauri 命令 |
+| `src-tauri/src/db.rs` | 修改 | 新增 dictionaries 表 |
+| `src-tauri/src/lib.rs` | 修改 | DictionaryManager 初始化 + 多路径内置词典搜索 |
+| `src-tauri/tauri.conf.json` | 修改 | bundle.resources 加入 ecdict.db |
+| `.gitignore` | 修改 | 排除 stardict.db（812MB 不应进 git） |
+| `src/lib/api.ts` | 修改 | DictEntry（新增 source_dict_id/name）+ 6 个 API 函数 + 类型定义 |
+| `src/stores/dictionaryStore.ts` | **新增** | 词典列表 Zustand store |
+| `src/stores/contextMenuStore.ts` | 修改 | 新增 clickedWord 字段 |
+| `src/stores/appStore.ts` | 修改 | 新增 'dictionary' 侧边栏标签 |
+| `src/components/DictionaryManager.tsx` | **新增** | 词典管理面板（列表/导入/验证/重命名/排序/启禁用） |
+| `src/components/ContextMenu.tsx` | 修改 | 词典预览 + 来源标注 + selectedText 预览 + clickedWord 优先查词 |
+| `src/components/PdfPage.tsx` | 修改 | getWordAtPosition() — span 坐标定位取词 |
+| `src/components/VocabularyPanel.tsx` | 修改 | 单词详情视图 + 复习按钮 + JSON 解析 |
+| `src/components/Sidebar.tsx` | 修改 | 注册 Dictionary 面板 |
+| `src/components/TitleBar.tsx` | 修改 | 新增 Dictionary (🌐) 标签按钮 |
+| `src-tauri/resources/ecdict.db` | **新增** | 开发用内置词典（21,506 词条，6.4 MB） |
+
 ## 未解决的问题
 
 - [ ] 大 PDF 首次打开时页面缩略图/快速定位功能缺失
 - [ ] 标注编辑器（PDF.js AnnotationEditorLayer）未集成
-- [ ] 单词库缺少词典查询功能（ECDICT 离线词典待集成）
 - [ ] TTS 语音朗读引擎待集成
 - [ ] 搜索不区分大小写、无正则支持
 - [ ] 无打印、导出功能
+- [ ] 词组/短语动词词典覆盖不足（stardict 340 万中仅 ~800 个高质量词组）

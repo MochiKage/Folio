@@ -5,6 +5,7 @@ import BookmarksPanel from './BookmarksPanel'
 import AnnotationsPanel from './AnnotationsPanel'
 import VocabularyPanel from './VocabularyPanel'
 import LibraryPanel from './LibraryPanel'
+import DictionaryManager from './DictionaryManager'
 
 export default function Sidebar() {
   const sidebarRef = useRef<HTMLElement>(null)
@@ -54,6 +55,7 @@ function SidebarPanel({ tab }: { tab: SidebarTab | null }) {
     case 'bookmarks':    return <BookmarksPanel />
     case 'annotations':  return <AnnotationsPanel />
     case 'vocabulary':   return <VocabularyPanel />
+    case 'dictionary':   return <DictionaryManager />
     case 'library':      return <LibraryPanel />
     default:
       return <p className="p-4 text-center text-xs text-[var(--text)] opacity-40">Select a tab to view</p>
