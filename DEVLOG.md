@@ -128,6 +128,38 @@ PDF 中的文字宽度是 PDF 引擎根据字体度量计算的，但浏览器�
 
 3. **Rust vs JS 边界**：当前所有 PDF 处理都在前端（JS），Rust 后端仅用于 SQLite。OCR 和 TTS 的 ONNX 推理应在 Rust 侧进行，避免阻塞 UI 线程。
 
+### 2026-08-12：选区驱动的标注系统 + 右键菜单 + 阅读进度
+
+**选区→标注闭环**：实现了从文本选择到标注创建、渲染、交互的完整链路。
+
+**右键上下文菜单**（`ContextMenu.tsx`）：
+- 选中文字后右键弹出菜单：4 色高亮（黄/绿/蓝/粉）、添加到词汇本、添加书签、复制
+- 移除 `App.tsx` 全局 `onContextMenu` 禁用，仅在文本层选区上弹出自定义菜单
+- 选区→PDF 坐标映射（`selection.ts`）：`getClientRects()` → 减 page 偏移 → `viewport.convertToPdfPoint()` → 存为 JSON rect
+
+**标注覆盖层**（`AnnotationOverlay.tsx`）：
+- 在 canvas 与 textLayer 之间渲染已存高亮矩形
+- 从 PDF 空间坐标经 `viewport.convertToViewportPoint()` 转换定位
+- 双击高亮区域自动弹出菜单（删除 / 加词汇 / 书签 / 复制）
+
+**高亮替换逻辑**：新高亮自动删除重叠的旧高亮，避免颜色叠加。
+
+**书签与阅读进度**：
+- `Ctrl+D` 快速添加书签
+- 滚动时 1.5 秒防抖自动持久化阅读进度（`updateReadingProgress`）
+- 图书馆面板文档可点击打开，自动恢复到上次阅读位置
+
+**外键约束修复**：打开 PDF 时自动 `upsertDocument` 创建数据库记录，解决 `annotations`/`bookmarks`/`vocabulary` 表外键引用 `documents(id)` 导致的静默插入失败。
+
+**导航修复**：书签/标注面板 `setPage` → `jumpToPage`（之前只改状态不滚动）。
+
+**坐标系统坑**：`rectsOverlap` 未处理 PDF 坐标系 Y 轴反转（PDF Y 向上 vs 屏幕 Y 向下），导致 `convertToPdfPoint` 返回的 rect 中 `y0 > y1`，AABB 重叠检测始终失败。修复用 `Math.min`/`Math.max` 归一化。
+
+**Store 设计**：
+- `annotationStore` — 按 `docId:page` 缓存标注，乐观更新
+- `contextMenuStore` — 右键菜单状态（坐标、选中文字、PDF rect、重叠标注 ID）
+- `pdfStore` 新增 `refreshKey` + `triggerRefresh()` — 标注/书签/词汇变更后刷新侧边面板
+
 ## 未解决的问题
 
 - [ ] 大 PDF 首次打开时页面缩略图/快速定位功能缺失

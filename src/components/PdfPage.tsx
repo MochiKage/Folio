@@ -1,9 +1,17 @@
 import { useRef, useEffect, useCallback, memo } from 'react'
-import type { PDFPageProxy } from 'pdfjs-dist'
+import type { PDFPageProxy, PageViewport } from 'pdfjs-dist'
 import { pdfjsLib } from '../lib/pdfjs'
 import { renderOcrTextLayer } from '../lib/ocr'
 import { mergeParagraphLines } from '../lib/textLayer'
 import { useOcrStore } from '../stores/ocrStore'
+import { useContextMenuStore } from '../stores/contextMenuStore'
+import { useAnnotationStore } from '../stores/annotationStore'
+import { selectionToPdfRects, mergeRects, rectsOverlap } from '../lib/selection'
+import AnnotationOverlay from './AnnotationOverlay'
+import type { Annotation } from '../lib/api'
+
+/** Stable empty array to avoid re-renders from `?? []` (same pattern as AnnotationOverlay) */
+const EMPTY_ANNOTATIONS: Annotation[] = []
 
 interface PdfPageProps {
   page: PDFPageProxy
@@ -27,10 +35,109 @@ const PdfPage = memo(function PdfPage({
   const renderTaskRef = useRef<ReturnType<typeof page.render> | null>(null)
   const textLayerInstanceRef = useRef<InstanceType<typeof TextLayer> | null>(null)
   const genRef = useRef(0)
+  /** Cache the last viewport so AnnotationOverlay and context-menu handler can read it */
+  const viewportRef = useRef<PageViewport>(page.getViewport({ scale: zoom, rotation }))
 
   const forceOcr = useOcrStore((s) => s.forceOcr)
   const cachedBoxes = useOcrStore(
     (s) => (documentId ? s.boxes[`${documentId}:${pageNumber}`] : undefined) ?? null,
+  )
+
+  const showContextMenu = useContextMenuStore((s) => s.show)
+  const pageAnnotations = useAnnotationStore(
+    (s) => (documentId ? s.byPage[`${documentId}:${pageNumber}`] : undefined) ?? EMPTY_ANNOTATIONS,
+  )
+
+  /** Find highlight annotations that overlap a PDF-space point or rect */
+  const findOverlappingHighlights = useCallback(
+    (target: [number, number, number, number]) => {
+      return pageAnnotations
+        .filter((a) => a.annot_type === 'highlight')
+        .filter((a) => {
+          try {
+            const r = JSON.parse(a.rect) as [number, number, number, number]
+            return Array.isArray(r) && r.length === 4 && rectsOverlap(target, r)
+          } catch { return false }
+        })
+    },
+    [pageAnnotations],
+  )
+
+  // Handle right-click on text layer → selection context menu
+  const handleContextMenu = useCallback(
+    (e: React.MouseEvent) => {
+      const selection = window.getSelection()
+      if (!selection || selection.isCollapsed) return // let browser show default menu
+
+      e.preventDefault()
+      e.stopPropagation()
+
+      const pageEl = (e.target as HTMLElement).closest('[data-page-number]') as HTMLElement
+      if (!pageEl) return
+
+      const viewport = viewportRef.current
+
+      const rects = selectionToPdfRects(selection, pageEl, viewport)
+      const merged = mergeRects(rects.map((r) => r.rect))
+
+      const overlapping = merged ? findOverlappingHighlights(merged) : []
+
+      showContextMenu({
+        x: e.clientX,
+        y: e.clientY,
+        selectedText: selection.toString().trim().slice(0, 500),
+        pageNumber,
+        pdfRect: merged,
+        overlappingAnnIds: overlapping.map((a) => a.id),
+      })
+    },
+    [pageNumber, showContextMenu, findOverlappingHighlights],
+  )
+
+  // Handle double-click on text layer → if over a highlight, select it and show actions
+  const handleDoubleClick = useCallback(
+    (e: React.MouseEvent) => {
+      const pageEl = (e.target as HTMLElement).closest('[data-page-number]') as HTMLElement
+      if (!pageEl) return
+
+      const pageRect = pageEl.getBoundingClientRect()
+      const vx = e.clientX - pageRect.left
+      const vy = e.clientY - pageRect.top
+
+      const viewport = viewportRef.current
+      const [px, py] = viewport.convertToPdfPoint(vx, vy)
+
+      // Create a tiny rect around the click point for overlap detection
+      const clickRect: [number, number, number, number] = [px - 1, py - 1, px + 1, py + 1]
+      const overlapping = findOverlappingHighlights(clickRect)
+
+      if (overlapping.length === 0) return // not on a highlight — let browser handle
+
+      e.preventDefault()
+      e.stopPropagation()
+
+      // Collect the text content and rects from the overlapping highlights
+      const mergedRects: Array<[number, number, number, number]> = []
+      const contents: string[] = []
+      for (const a of overlapping) {
+        try {
+          const r = JSON.parse(a.rect) as [number, number, number, number]
+          if (Array.isArray(r) && r.length === 4) mergedRects.push(r)
+        } catch {}
+        if (a.content) contents.push(a.content)
+      }
+      const merged = mergeRects(mergedRects)
+
+      showContextMenu({
+        x: e.clientX,
+        y: e.clientY,
+        selectedText: contents.join('; ') || '(highlight)',
+        pageNumber,
+        pdfRect: merged,
+        overlappingAnnIds: overlapping.map((a) => a.id),
+      })
+    },
+    [pageNumber, showContextMenu, findOverlappingHighlights],
   )
 
   const renderPage = useCallback(async () => {
@@ -51,6 +158,7 @@ const PdfPage = memo(function PdfPage({
     const gen = genRef.current
 
     const viewport = page.getViewport({ scale: zoom, rotation })
+    viewportRef.current = viewport
 
     canvas.width = viewport.width
     canvas.height = viewport.height
@@ -139,7 +247,19 @@ const PdfPage = memo(function PdfPage({
   return (
     <div className="pdf-page relative mx-auto mb-4 shadow-lg" data-page-number={pageNumber}>
       <canvas ref={canvasRef} className="block" />
-      <div ref={textLayerRef} className="pdf-text-layer absolute inset-0" />
+      {documentId && (
+        <AnnotationOverlay
+          documentId={documentId}
+          pageNumber={pageNumber}
+          viewport={viewportRef.current}
+        />
+      )}
+      <div
+        ref={textLayerRef}
+        className="pdf-text-layer absolute inset-0"
+        onContextMenu={handleContextMenu}
+        onDoubleClick={handleDoubleClick}
+      />
     </div>
   )
 })

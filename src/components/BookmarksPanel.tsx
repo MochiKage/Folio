@@ -4,7 +4,8 @@ import { usePdfStore } from '../stores/pdfStore'
 import * as api from '../lib/api'
 
 export default function BookmarksPanel() {
-  const { activeDocId, setPage } = usePdfStore()
+  const { activeDocId, jumpToPage } = usePdfStore()
+  const refreshKey = usePdfStore((s) => s.refreshKey)
   const [bookmarks, setBookmarks] = useState<api.Bookmark[]>([])
 
   useEffect(() => {
@@ -13,7 +14,7 @@ export default function BookmarksPanel() {
       return
     }
     api.getBookmarks(activeDocId).then(setBookmarks)
-  }, [activeDocId])
+  }, [activeDocId, refreshKey])
 
   const handleDelete = async (id: string) => {
     await api.removeBookmark(id)
@@ -41,7 +42,7 @@ export default function BookmarksPanel() {
           className="flex items-center gap-1 rounded px-2 py-1.5 hover:bg-[var(--border)]/30 group"
         >
           <button
-            onClick={() => setPage(bm.page)}
+            onClick={() => jumpToPage(bm.page)}
             className="flex-1 text-left text-xs text-[var(--text)] opacity-70 hover:opacity-100"
           >
             <span className="font-mono text-[10px] text-[var(--color-accent)]">

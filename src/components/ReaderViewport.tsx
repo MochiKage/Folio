@@ -2,9 +2,12 @@ import { useRef, useEffect, useCallback, useMemo, useState, memo } from 'react'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 import { usePdfStore } from '../stores/pdfStore'
 import { useAppStore } from '../stores/appStore'
+import { useAnnotationStore } from '../stores/annotationStore'
 import { usePdfLoader } from '../hooks/usePdfLoader'
 import PdfPage from './PdfPage'
 import { open } from '@tauri-apps/plugin-dialog'
+import * as api from '../lib/api'
+import { generateId } from '../lib/selection'
 
 // How many pages ABOVE and BELOW the viewport to pre-render
 const PAGE_BUFFER = 2
@@ -20,6 +23,12 @@ export default function ReaderViewport() {
   const toggleFocusMode = useAppStore((s) => s.toggleFocusMode)
   const { activePage, zoom, rotation, setPage, setZoom, addDocument, activeDocId } = usePdfStore()
   const { pdfDoc, loading, error, loadPdfFromPath } = usePdfLoader()
+  const fetchAnnotations = useAnnotationStore((s) => s.fetchForDocument)
+
+  // Fetch annotations ONCE when document changes (not per-page)
+  useEffect(() => {
+    if (activeDocId) fetchAnnotations(activeDocId)
+  }, [activeDocId, fetchAnnotations])
 
   // Page dimensions for fit-width / fit-page calculations
   const [pageDims, setPageDims] = useState({ w: 612, h: 792 })
@@ -131,11 +140,12 @@ export default function ReaderViewport() {
     requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(tryScroll, 120)))
   }, [scrollTarget])
 
-  // When pdfDoc changes after loading, register in store
+  // When pdfDoc changes after loading, register in store AND ensure DB record exists
   useEffect(() => {
     if (pdfDoc && pendingDocRef.current) {
       const filePath = pendingDocRef.current
       const name = filePath.split(/[/\\]/).pop() || 'Untitled'
+      const totalPages = pdfDoc.numPages
       addDocument({
         id: filePath,
         name,
@@ -143,8 +153,25 @@ export default function ReaderViewport() {
         doc: pdfDoc,
         currentPage: 1,
         zoom: 1.5,
-        totalPages: pdfDoc.numPages,
+        totalPages,
       })
+      // Ensure a document record exists for FK constraints (annotations,
+      // bookmarks, vocabulary all reference documents.id).
+      // Fire-and-forget — failure is non-fatal (e.g. if the record already exists).
+      api.upsertDocument({
+        id: filePath,
+        title: name,
+        authors: '[]',
+        file_path: filePath,
+        doi: null,
+        year: null,
+        page_count: totalPages,
+        last_page: 1,
+        read_progress: 0,
+        metadata: '{}',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }).catch((err) => console.error('[ReaderViewport] upsertDocument failed:', err))
       pendingDocRef.current = null
     }
   }, [pdfDoc, addDocument])
@@ -166,6 +193,7 @@ export default function ReaderViewport() {
   }, [loadPdfFromPath])
 
   // Track current page based on scroll
+  const progressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const handleScroll = useCallback(() => {
     const container = containerRef.current
     if (!container) return
@@ -177,6 +205,16 @@ export default function ReaderViewport() {
       if (vis > bestVis) { bestVis = vis; bestPage = num }
     })
     if (bestPage !== activePage) setPage(bestPage)
+
+    // Debounced progress persistence
+    const docId = usePdfStore.getState().activeDocId
+    const total = usePdfStore.getState().getActiveDoc()?.totalPages ?? 1
+    if (docId && bestPage > 0) {
+      if (progressTimerRef.current) clearTimeout(progressTimerRef.current)
+      progressTimerRef.current = setTimeout(() => {
+        api.updateReadingProgress(docId, bestPage, bestPage / Math.max(1, total))
+      }, 1500)
+    }
   }, [activePage, setPage])
 
   // Zoom with rAF debounce
@@ -202,6 +240,19 @@ export default function ReaderViewport() {
       }
       if (e.ctrlKey && e.key === 'b') { e.preventDefault(); useAppStore.getState().toggleSidebar() }
       if (e.ctrlKey && e.key === 'o') { e.preventDefault(); handleOpenFile() }
+      if (e.ctrlKey && e.key === 'd') {
+        e.preventDefault()
+        const { activeDocId, activePage, triggerRefresh } = usePdfStore.getState()
+        if (activeDocId) {
+          api.addBookmark({
+            id: generateId(),
+            document_id: activeDocId,
+            page: activePage,
+            label: `Page ${activePage}`,
+            created_at: new Date().toISOString(),
+          }).then(() => triggerRefresh())
+        }
+      }
       // Zoom shortcuts
       if (e.ctrlKey && e.key === '0') { e.preventDefault(); setZoom(1.5) }
       if (e.ctrlKey && e.key === '=') { e.preventDefault(); setZoom(Math.min(4, usePdfStore.getState().zoom + 0.25)) }

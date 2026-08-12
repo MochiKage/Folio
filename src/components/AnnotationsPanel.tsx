@@ -11,7 +11,8 @@ const typeIcons: Record<string, string> = {
 }
 
 export default function AnnotationsPanel() {
-  const { activeDocId, setPage } = usePdfStore()
+  const { activeDocId, jumpToPage } = usePdfStore()
+  const refreshKey = usePdfStore((s) => s.refreshKey)
   const [annotations, setAnnotations] = useState<api.Annotation[]>([])
 
   useEffect(() => {
@@ -20,7 +21,7 @@ export default function AnnotationsPanel() {
       return
     }
     api.getAnnotations(activeDocId).then(setAnnotations)
-  }, [activeDocId])
+  }, [activeDocId, refreshKey])
 
   const handleDelete = async (id: string) => {
     await api.deleteAnnotation(id)
@@ -47,7 +48,7 @@ export default function AnnotationsPanel() {
               {typeIcons[ann.annot_type] || '📌'}
             </span>
             <button
-              onClick={() => setPage(ann.page)}
+              onClick={() => jumpToPage(ann.page)}
               className="flex-1 text-left"
             >
               {ann.content ? (

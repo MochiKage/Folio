@@ -29,6 +29,10 @@ interface PdfState {
   jumpToPage: (page: number) => void
   _scrollTarget: number | null
   clearScrollTarget: () => void
+
+  /** Increment on bookmark / annotation changes so panels can refresh */
+  refreshKey: number
+  triggerRefresh: () => void
 }
 
 export const usePdfStore = create<PdfState>((set, get) => ({
@@ -102,4 +106,7 @@ export const usePdfStore = create<PdfState>((set, get) => ({
     const { documents, activeDocId } = get()
     return documents.find((d) => d.id === activeDocId)
   },
+
+  refreshKey: 0,
+  triggerRefresh: () => set((s) => ({ refreshKey: s.refreshKey + 1 })),
 }))

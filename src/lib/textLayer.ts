@@ -1,4 +1,18 @@
-import type { TextContent, TextItem } from 'pdfjs-dist'
+/** Minimal interfaces matching PDF.js text content types (v6 compat). */
+interface TextItem {
+  str: string
+  dir?: string
+  width?: number
+  height?: number
+  transform?: number[]
+  fontName?: string
+  hasEOL?: boolean
+}
+
+interface TextContent {
+  items: TextItem[]
+  styles?: Record<string, unknown>
+}
 
 /**
  * Minimum number of non-whitespace characters required to consider a page
@@ -14,7 +28,7 @@ const MIN_EMBEDDED_CHARS = 8
 export function hasEmbeddedText(tc: TextContent): boolean {
   const chars = tc.items
     .filter((it): it is TextItem => 'str' in it)
-    .reduce((n, it) => n + it.str.trim().length, 0)
+    .reduce((n: number, it: TextItem) => n + it.str.trim().length, 0)
   return chars >= MIN_EMBEDDED_CHARS
 }
 

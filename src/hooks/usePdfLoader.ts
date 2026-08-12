@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
-import { pdfjsLib, getDocumentParamsFromData } from '../lib/pdfjs'
+import { loadPdfFile } from '../lib/pdfLoader'
 
 interface UsePdfLoaderResult {
   pdfDoc: PDFDocumentProxy | null
@@ -42,6 +42,7 @@ export function usePdfLoader(): UsePdfLoaderResult {
       setError(null)
 
       try {
+        const { pdfjsLib, getDocumentParamsFromData } = await import('../lib/pdfjs')
         const params = getDocumentParamsFromData(data)
         const loadingTask = pdfjsLib.getDocument(params)
         const doc = await loadingTask.promise
@@ -60,17 +61,22 @@ export function usePdfLoader(): UsePdfLoaderResult {
 
   const loadPdfFromPath = useCallback(
     async (filePath: string) => {
-      // Import Tauri fs dynamically (only available in Tauri context)
-      const { readFile } = await import('@tauri-apps/plugin-fs')
-      const data = await readFile(filePath)
-      // readFile returns Uint8Array, convert to ArrayBuffer if needed
-      const buffer = data.buffer.slice(
-        data.byteOffset,
-        data.byteOffset + data.byteLength
-      ) as ArrayBuffer
-      await loadPdfFromData(buffer)
+      closePdf()
+      setLoading(true)
+      setError(null)
+      try {
+        const { doc } = await loadPdfFile(filePath)
+        docRef.current = doc
+        setPdfDoc(doc)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Failed to load PDF'
+        setError(message)
+        setPdfDoc(null)
+      } finally {
+        setLoading(false)
+      }
     },
-    [loadPdfFromData]
+    [closePdf],
   )
 
   return { pdfDoc, loading, error, loadPdfFromPath, loadPdfFromData, closePdf }

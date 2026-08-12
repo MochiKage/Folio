@@ -1,6 +1,8 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback, memo } from 'react'
 import { Search, Filter } from 'lucide-react'
 import * as api from '../lib/api'
+import { loadPdfFile } from '../lib/pdfLoader'
+import { usePdfStore } from '../stores/pdfStore'
 
 const namespaceLabels: Record<string, string> = {
   discipline: 'Discipline',
@@ -9,13 +11,14 @@ const namespaceLabels: Record<string, string> = {
   custom: 'Tags',
 }
 
-import { memo } from 'react'
-
 const LibraryPanel = memo(function LibraryPanel() {
   const [documents, setDocuments] = useState<api.Document[]>([])
   const [tags, setTags] = useState<api.TagWithCount[]>([])
   const [search, setSearch] = useState('')
   const [selectedTags, setSelectedTags] = useState<string[]>([])
+  const [opening, setOpening] = useState<string | null>(null)
+
+  const addDocument = usePdfStore((s) => s.addDocument)
 
   useEffect(() => {
     api.getAllDocuments().then(setDocuments)
@@ -27,6 +30,29 @@ const LibraryPanel = memo(function LibraryPanel() {
       prev.includes(tagId) ? prev.filter((id) => id !== tagId) : [...prev, tagId]
     )
   }
+
+  const handleOpen = useCallback(
+    async (doc: api.Document) => {
+      setOpening(doc.id)
+      try {
+        const { doc: pdfDoc, name, path } = await loadPdfFile(doc.file_path)
+        addDocument({
+          id: path,
+          name,
+          path,
+          doc: pdfDoc,
+          currentPage: doc.last_page > 0 ? doc.last_page : 1,
+          zoom: 1.5,
+          totalPages: pdfDoc.numPages,
+        })
+      } catch (err) {
+        console.error('[LibraryPanel] Failed to open document:', err)
+      } finally {
+        setOpening(null)
+      }
+    },
+    [addDocument],
+  )
 
   // Group tags by namespace
   const groupedTags = tags.reduce(
@@ -102,20 +128,37 @@ const LibraryPanel = memo(function LibraryPanel() {
         </div>
       ) : (
         <div className="space-y-0.5">
-          {filtered.map((doc) => (
-            <div
-              key={doc.id}
-              className="rounded px-2 py-1.5 hover:bg-[var(--border)]/30"
-            >
-              <p className="text-xs font-medium text-[var(--text)] truncate">
-                {doc.title || doc.file_path.split(/[/\\]/).pop() || 'Untitled'}
-              </p>
-              <p className="text-[10px] text-[var(--text)] opacity-40">
-                {doc.page_count > 0 && `${doc.page_count} pages • `}
-                Progress: {Math.round(doc.read_progress * 100)}%
-              </p>
-            </div>
-          ))}
+          {filtered.map((doc) => {
+            const isLoading = opening === doc.id
+            return (
+              <button
+                key={doc.id}
+                onClick={() => handleOpen(doc)}
+                disabled={isLoading}
+                className="w-full rounded px-2 py-1.5 text-left hover:bg-[var(--border)]/30 disabled:opacity-50"
+              >
+                <div className="flex items-center gap-1.5">
+                  {isLoading && (
+                    <div className="h-3 w-3 shrink-0 animate-spin rounded-full border border-[var(--color-accent)] border-t-transparent" />
+                  )}
+                  <p className="text-xs font-medium text-[var(--text)] truncate">
+                    {doc.title || doc.file_path.split(/[/\\]/).pop() || 'Untitled'}
+                  </p>
+                </div>
+                <p className="text-[10px] text-[var(--text)] opacity-40">
+                  {doc.page_count > 0 && `${doc.page_count} pages`}
+                  {doc.last_page > 0 && (
+                    <span className="text-[var(--color-accent)]">
+                      {' · '}Resume at p.{doc.last_page} ({Math.round(doc.read_progress * 100)}%)
+                    </span>
+                  )}
+                  {doc.last_page === 0 && doc.page_count > 0 && (
+                    <>{' · '}Unread</>
+                  )}
+                </p>
+              </button>
+            )
+          })}
         </div>
       )}
     </div>

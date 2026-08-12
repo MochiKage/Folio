@@ -1,15 +1,17 @@
 import { useState, useEffect } from 'react'
 import { Search, BookOpen, Trash2 } from 'lucide-react'
 import * as api from '../lib/api'
+import { usePdfStore } from '../stores/pdfStore'
 
 export default function VocabularyPanel() {
   const [words, setWords] = useState<api.VocabWord[]>([])
   const [search, setSearch] = useState('')
   const [selectedWord, setSelectedWord] = useState<api.VocabWord | null>(null)
+  const refreshKey = usePdfStore((s) => s.refreshKey)
 
   useEffect(() => {
     api.getVocabulary().then(setWords)
-  }, [])
+  }, [refreshKey])
 
   const handleDelete = async (id: string) => {
     await api.removeVocabulary(id)
