@@ -28,3 +28,4 @@ src-tauri/target
 
 # OS
 Thumbs.db
+.opencode
