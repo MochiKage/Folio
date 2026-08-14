@@ -3,6 +3,7 @@ import type { PDFDocumentProxy } from 'pdfjs-dist'
 import { usePdfStore } from '../stores/pdfStore'
 import { useAppStore } from '../stores/appStore'
 import { useAnnotationStore } from '../stores/annotationStore'
+import { useOcrStore } from '../stores/ocrStore'
 import { usePdfLoader } from '../hooks/usePdfLoader'
 import PdfPage from './PdfPage'
 import { open } from '@tauri-apps/plugin-dialog'
@@ -252,6 +253,11 @@ export default function ReaderViewport() {
             created_at: new Date().toISOString(),
           }).then(() => triggerRefresh())
         }
+      }
+      // Debug text layer: show OCR span bounds (Ctrl+Shift+D)
+      if (e.ctrlKey && e.shiftKey && e.key === 'D') {
+        e.preventDefault()
+        useOcrStore.getState().toggleDebugTextLayer()
       }
       // Zoom shortcuts
       if (e.ctrlKey && e.key === '0') { e.preventDefault(); setZoom(1.5) }

@@ -11,12 +11,16 @@ interface OcrState {
   /** User-forced OCR mode — run PaddleOCR even on pages with embedded
    *  text (scanned pages are OCR'd automatically). */
   forceOcr: boolean
+  /** Debug text layer: draw OCR span bounds (red dashed outline) so
+   *  alignment issues are visible without console digging. */
+  debugTextLayer: boolean
   /** Per-page OCR statuses, keyed by "docId:pageNum" */
   statuses: Record<string, OcrStatus>
   /** Cached OCR boxes in PDF point space, keyed by "docId:pageNum" */
   boxes: Record<string, OcrBox[]>
 
   toggleForceOcr: () => void
+  toggleDebugTextLayer: () => void
   setPageStatus: (docId: string, page: number, status: OcrStatus) => void
   setPageResult: (docId: string, page: number, boxes: OcrBox[]) => void
   clearPageOcr: (docId: string, page: number) => void
@@ -25,10 +29,12 @@ interface OcrState {
 
 export const useOcrStore = create<OcrState>((set) => ({
   forceOcr: false,
+  debugTextLayer: false,
   statuses: {},
   boxes: {},
 
   toggleForceOcr: () => set((s) => ({ forceOcr: !s.forceOcr })),
+  toggleDebugTextLayer: () => set((s) => ({ debugTextLayer: !s.debugTextLayer })),
 
   setPageStatus: (docId, page, status) =>
     set((s) => ({

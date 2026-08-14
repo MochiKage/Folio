@@ -90,12 +90,12 @@ pub fn get_ocr_result(
     Ok(result)
 }
 
-/// Run PaddleOCR on a PNG render of one page (300 DPI, rendered at rotation 0).
+/// Run PaddleOCR on a 300-DPI render of one page (rotation 0).
 ///
-/// The frontend passes the raw PNG bytes plus the render parameters needed to
-/// map image-pixel coordinates back to PDF space:
-///   - `dpi` / `image_height`: render scale info (image width is derived from
-///     the decoded PNG itself)
+/// The frontend passes the raw RGB pixels of the canvas (straight from
+/// getImageData — no PNG encode/decode round trip) plus the render
+/// parameters needed to map image-pixel coordinates back to PDF space:
+///   - `image_width` / `image_height`: pixel dimensions
 ///   - `view_box`: the page's PDF viewBox [x0, y0, x1, y1] at rotation 0
 #[tauri::command]
 pub async fn run_ocr(
@@ -104,14 +104,23 @@ pub async fn run_ocr(
     doc_id: String,
     page: i32,
     image: Vec<u8>,
-    dpi: f32,
-    image_height: f32,
+    image_width: u32,
+    image_height: u32,
     view_box: [f32; 4],
 ) -> Result<OcrPageData, String> {
     let db = db.inner().clone();
     let state = Arc::clone(state.inner());
     tauri::async_runtime::spawn_blocking(move || {
-        run_ocr_blocking(&db, &state, &doc_id, page, &image, dpi, image_height, view_box)
+        run_ocr_blocking(
+            &db,
+            &state,
+            &doc_id,
+            page,
+            &image,
+            image_width,
+            image_height,
+            view_box,
+        )
     })
     .await
     .map_err(|e| format!("OCR task panicked: {}", e))?
@@ -123,12 +132,12 @@ fn run_ocr_blocking(
     doc_id: &str,
     page: i32,
     image: &[u8],
-    _dpi: f32,
-    _image_height: f32,
+    image_width: u32,
+    image_height: u32,
     view_box: [f32; 4],
 ) -> Result<OcrPageData, String> {
     let engine = state.engine()?;
-    let (boxes, (img_w, img_h)) = engine.recognize(image)?;
+    let (boxes, (img_w, img_h)) = engine.recognize_rgb(image, image_width, image_height)?;
 
     // Map image-pixel boxes (y-down) to PDF space (y-up) via the viewBox.
     // The render used rotation 0 and scale = dpi/72, so the mapping is a

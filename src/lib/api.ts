@@ -287,8 +287,9 @@ export function getOcrResult(
 export function runOcr(
   docId: string,
   page: number,
-  image: number[],
-  dpi: number,
+  /** Raw RGB pixels (width*height*3 bytes, row-major) */
+  image: Uint8Array,
+  imageWidth: number,
   imageHeight: number,
   viewBox: [number, number, number, number]
 ): Promise<OcrPageData> {
@@ -296,7 +297,7 @@ export function runOcr(
     docId,
     page,
     image,
-    dpi,
+    imageWidth,
     imageHeight,
     viewBox,
   })

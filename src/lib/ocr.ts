@@ -343,7 +343,9 @@ export async function renderPageForOcr(
   page: PDFPageProxy,
   dpi: number = OCR_DPI,
 ): Promise<{
-  bytes: Uint8Array
+  /** Raw RGB pixels (width*height*3 bytes, row-major) */
+  pixels: Uint8Array
+  width: number
   height: number
   viewBox: [number, number, number, number]
 }> {
@@ -359,17 +361,21 @@ export async function renderPageForOcr(
 
   await page.render({ canvas, viewport }).promise
 
-  const blob = await new Promise<Blob>((resolve, reject) =>
-    canvas.toBlob(
-      (b) => (b ? resolve(b) : reject(new Error('canvas.toBlob returned null'))),
-      'image/png',
-    ),
-  )
-  const bytes = new Uint8Array(await blob.arrayBuffer())
+  // Raw RGB transfer: the PNG encode/decode round trip costs ~2s/page in
+  // debug builds (the Rust-side PNG decode alone was 2.2s at 300 DPI).
+  const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+  const src = imgData.data
+  const pixels = new Uint8Array(canvas.width * canvas.height * 3)
+  for (let i = 0, j = 0; i < src.length; i += 4, j += 3) {
+    pixels[j] = src[i]
+    pixels[j + 1] = src[i + 1]
+    pixels[j + 2] = src[i + 2]
+  }
 
   return {
-    bytes,
-    height: viewport.height,
+    pixels,
+    width: canvas.width,
+    height: canvas.height,
     viewBox: viewport.viewBox as [number, number, number, number],
   }
 }

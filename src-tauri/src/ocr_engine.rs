@@ -179,19 +179,54 @@ impl OcrEngine {
         })
     }
 
-    /// Run the full OCR pipeline on a PNG image.
-    /// Returns (boxes in image-pixel coordinates y-down, in reading order,
-    /// and the decoded image dimensions for pixel→PDF mapping).
+    /// Run the full OCR pipeline on a PNG image (smoke-test/dev tool).
+    /// The app itself calls `recognize_rgb` — raw pixels skip the PNG
+    /// encode/decode round trip, which costs ~2s/page in debug builds.
     pub fn recognize(&self, png: &[u8]) -> Result<(Vec<OcrBox>, (u32, u32)), String> {
-        let t0 = Instant::now();
-
         let src = image::load_from_memory(png)
             .map_err(|e| format!("PNG decode failed: {}", e))?
             .to_rgb8();
         let (src_w, src_h) = src.dimensions();
+        self.recognize_image(&src, src_w, src_h)
+    }
+
+    /// Run the full OCR pipeline on raw RGB pixels (width*height*3 bytes,
+    /// row-major). The frontend transfers the 300-DPI canvas straight from
+    /// getImageData instead of PNG-encoding it.
+    pub fn recognize_rgb(
+        &self,
+        rgb: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<(Vec<OcrBox>, (u32, u32)), String> {
+        let expected = (width * height * 3) as usize;
+        if rgb.len() != expected {
+            return Err(format!(
+                "raw RGB size mismatch: {} bytes for {}x{} (expected {})",
+                rgb.len(),
+                width,
+                height,
+                expected
+            ));
+        }
+        let src = RgbImage::from_raw(width, height, rgb.to_vec())
+            .ok_or_else(|| format!("invalid image dimensions {}x{}", width, height))?;
+        self.recognize_image(&src, width, height)
+    }
+
+    /// Shared pipeline body: detection + recognition on an RGB image.
+    /// Returns (boxes in image-pixel coordinates y-down, in reading order,
+    /// and the image dimensions for pixel→PDF mapping).
+    fn recognize_image(
+        &self,
+        src: &RgbImage,
+        src_w: u32,
+        src_h: u32,
+    ) -> Result<(Vec<OcrBox>, (u32, u32)), String> {
+        let t0 = Instant::now();
 
         // ── Detection ──
-        let (det_input, rw, rh) = det_preprocess(&src);
+        let (det_input, rw, rh) = det_preprocess(src);
         let t1 = Instant::now();
 
         let det_tensor = Tensor::from_array((vec![1i64, 3, rh as i64, rw as i64], det_input))
@@ -225,7 +260,7 @@ impl OcrEngine {
         for batch in quads.chunks(REC_BATCH_NUM) {
             let crops: Vec<RgbImage> = batch
                 .iter()
-                .map(|(q, _)| rotate_crop(&src, &q.corners))
+                .map(|(q, _, _)| rotate_crop(src, &q.corners))
                 .collect();
             let (logits, timesteps, batch_size) = self.rec_infer_batch(&crops)?;
             let classes = logits.len() / (timesteps * batch_size);
@@ -238,7 +273,7 @@ impl OcrEngine {
                     classes
                 ));
             }
-            for (i, (quad, tight)) in batch.iter().enumerate() {
+            for (i, (quad, tight, line_h)) in batch.iter().enumerate() {
                 let start = i * timesteps * classes;
                 let (text, conf, emissions) =
                     ctc_decode(&logits[start..start + timesteps * classes], classes, &self.keys);
@@ -251,10 +286,16 @@ impl OcrEngine {
                 // CTC text only supplies the word count — the boundaries
                 // themselves are real inter-word gaps in the pixels.
                 let word_count = text.split(' ').filter(|s| !s.is_empty()).count();
-                let profile: Vec<u32> = if tight[2] - tight[0] > tight[3] - tight[1] {
-                    source_word_profile(&src, *tight)
+                let horizontal = tight[2] - tight[0] > tight[3] - tight[1];
+                // Skew guard: a tilted line inflates the axis-aligned
+                // tight height (1.5° → ~2.2×); the expanded sample band
+                // would then catch neighboring lines' ink and corrupt the
+                // gaps. Skip pixel extraction — CTC fallback is safer.
+                let skewed = tight[3] - tight[1] > 1.4 * line_h;
+                let profile: Vec<u32> = if horizontal && !skewed {
+                    source_word_profile(src, *tight, 0.35 * line_h)
                 } else {
-                    Vec::new() // vertical text — gaps run across columns
+                    Vec::new()
                 };
                 let word_bounds: Vec<[f32; 2]> = word_segments(&profile, word_count)
                     .map(|segs| segs.into_iter().map(|(a, b)| [a, b]).collect())
@@ -397,17 +438,19 @@ struct Quad {
 /// `pred` is the probability map at the resized-input resolution
 /// (verified: the det model outputs at full input resolution).
 ///
-/// Returns (quad, tight_bbox) pairs in original-image pixel coordinates
-/// (y-down). The quad is the unclipped (padded) box used for recognition
-/// cropping; the tight bbox is the extent of the detected text pixels and
-/// is used by the frontend to align the rendered text layer with the page.
+/// Returns (quad, tight_bbox, line_height) triples in original-image
+/// pixel coordinates (y-down). The quad is the unclipped (padded) box used
+/// for recognition cropping; the tight bbox is the extent of the detected
+/// text pixels; line_height is the pre-unclip PCA height (the line's ink
+/// height regardless of skew) — used to size the word-gap profile band
+/// and to detect skewed lines.
 fn db_postprocess(
     pred: &[f32],
     ph: usize,
     pw: usize,
     src_w: usize,
     src_h: usize,
-) -> Vec<(Quad, [f32; 4])> {
+) -> Vec<(Quad, [f32; 4], f32)> {
     // 1. Binarize + dilate (2x2 kernel ≈ 1px growth, closes tiny gaps)
     let mut mask = vec![0u8; ph * pw];
     for (i, v) in pred.iter().enumerate() {
@@ -418,7 +461,7 @@ fn db_postprocess(
     let mask = dilate(&mask, ph, pw);
 
     // 2. Connected components (4-connectivity, like the reference contours)
-    let mut boxes: Vec<(Quad, f32, [f32; 4])> = Vec::new();
+    let mut boxes: Vec<(Quad, f32, [f32; 4], f32)> = Vec::new();
     let mut visited = vec![false; ph * pw];
     for start in 0..(ph * pw) {
         if mask[start] == 0 || visited[start] {
@@ -458,6 +501,9 @@ fn db_postprocess(
             if quad.min_side() < DET_MIN_SIZE {
                 continue;
             }
+            // Ink height, skew-independent. The PCA quad lives in map
+            // space — scale to source pixels for downstream use.
+            let quad_h = quad.height() * src_h as f32 / ph as f32;
             // fast score: mean prob inside the rect
             let score = box_score_fast(pred, pw, ph, &quad);
             if score < DET_BOX_THRESH {
@@ -489,7 +535,7 @@ fn db_postprocess(
                 ((max_x + 1) as f32 / pw as f32 * src_w as f32).clamp(0.0, src_w as f32 - 1.0),
                 ((max_y + 1) as f32 / ph as f32 * src_h as f32).clamp(0.0, src_h as f32 - 1.0),
             ];
-            boxes.push((quad, score, tight));
+            boxes.push((quad, score, tight, quad_h));
         }
     }
 
@@ -498,7 +544,7 @@ fn db_postprocess(
     let median_h = median(
         &mut boxes
             .iter()
-            .map(|(q, _, _)| q.height())
+            .map(|(q, _, _, _)| q.height())
             .collect::<Vec<f32>>(),
     );
     let tol = median_h.max(10.0) * 0.5;
@@ -524,7 +570,10 @@ fn db_postprocess(
         }
     }
 
-    boxes.into_iter().map(|(q, _, tight)| (q, tight)).collect()
+    boxes
+        .into_iter()
+        .map(|(q, _, tight, h)| (q, tight, h))
+        .collect()
 }
 
 fn neighbors4(x: usize, y: usize, w: usize, h: usize) -> [Option<(usize, usize)>; 4] {
@@ -690,18 +739,20 @@ fn median(vals: &mut [f32]) -> f32 {
 /// the detection map — the det map is downscaled ~2.5× and dilated, at
 /// which scale inter-word gaps (2-3 columns) get closed entirely.
 ///
-/// The sampled rows are expanded 35% above/below the tight box: the det
-/// mask systematically misses thin top/bottom strokes (crossbars,
+/// The sampled rows are expanded `expand` px above/below the tight box:
+/// the det mask systematically misses thin top/bottom strokes (crossbars,
 /// ascenders, descenders), so the tight box truncates them. Without the
 /// expansion those columns read as fake word gaps (e.g. the "Th" ligature
-/// area shows a 14px gap inside the word).
-fn source_word_profile(src: &RgbImage, tight: [f32; 4]) -> Vec<u32> {
+/// area shows a 14px gap inside the word). `expand` is sized from the
+/// line's ink height (skew-independent), NOT the tight height — a skewed
+/// line inflates the axis-aligned tight box and would over-expand into
+/// neighboring lines.
+fn source_word_profile(src: &RgbImage, tight: [f32; 4], expand: f32) -> Vec<u32> {
     let (iw, ih) = src.dimensions();
     let x0 = tight[0].round() as u32;
     let x1 = (tight[2].round() as u32).min(iw.saturating_sub(1));
-    let th = tight[3] - tight[1];
-    let y0 = ((tight[1] - 0.35 * th).round() as i64).clamp(0, ih as i64 - 1) as u32;
-    let y1 = ((tight[3] + 0.35 * th).round() as i64).clamp(0, ih as i64 - 1) as u32;
+    let y0 = ((tight[1] - expand).round() as i64).clamp(0, ih as i64 - 1) as u32;
+    let y1 = ((tight[3] + expand).round() as i64).clamp(0, ih as i64 - 1) as u32;
     if x1 < x0 || y1 < y0 {
         return Vec::new();
     }
@@ -715,6 +766,16 @@ fn source_word_profile(src: &RgbImage, tight: [f32; 4]) -> Vec<u32> {
             if lum < 160.0 {
                 profile[(x - x0) as usize] += 1;
             }
+        }
+    }
+    // Noise suppression: scan speckles are 1-2 isolated dark pixels, real
+    // strokes occupy ≥3 rows of the sampled band (even "i" dots and
+    // periods). Zeroing sparse columns keeps word gaps intact on noisy
+    // scans — verified: a 13-word line on a speckled scan rejected the
+    // gap split at count≥1 (8px fake splits) but accepted at count≥3.
+    for p in profile.iter_mut() {
+        if *p < 3 {
+            *p = 0;
         }
     }
     profile

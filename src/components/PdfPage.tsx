@@ -1,7 +1,7 @@
 import { useRef, useEffect, useCallback, memo } from 'react'
 import type { PDFPageProxy, PageViewport } from 'pdfjs-dist'
 import { pdfjsLib } from '../lib/pdfjs'
-import { renderOcrTextLayer, renderPageForOcr, OCR_DPI } from '../lib/ocr'
+import { renderOcrTextLayer, renderPageForOcr } from '../lib/ocr'
 import { mergeParagraphLines, hasEmbeddedText } from '../lib/textLayer'
 import { useOcrStore, enqueueOcrJob } from '../stores/ocrStore'
 import { useContextMenuStore } from '../stores/contextMenuStore'
@@ -40,6 +40,7 @@ const PdfPage = memo(function PdfPage({
   const viewportRef = useRef<PageViewport>(page.getViewport({ scale: zoom, rotation }))
 
   const forceOcr = useOcrStore((s) => s.forceOcr)
+  const debugTextLayer = useOcrStore((s) => s.debugTextLayer)
   const cachedBoxes = useOcrStore(
     (s) => (documentId ? s.boxes[`${documentId}:${pageNumber}`] : undefined) ?? null,
   )
@@ -253,12 +254,12 @@ const PdfPage = memo(function PdfPage({
         ) {
           return cached.boxes
         }
-        const { bytes, height, viewBox } = await renderPageForOcr(page)
+        const { pixels, width, height, viewBox } = await renderPageForOcr(page)
         const res = await api.runOcr(
           documentId,
           pageNumber,
-          Array.from(bytes),
-          OCR_DPI,
+          pixels,
+          width,
           height,
           viewBox,
         )
@@ -335,7 +336,7 @@ const PdfPage = memo(function PdfPage({
       if (hasCached) {
         // OCR result (from store): render selectable spans from the
         // stored PDF-space bounding boxes.
-        renderOcrTextLayer(textLayerDiv, cachedBoxes!, viewport)
+        renderOcrTextLayer(textLayerDiv, cachedBoxes!, viewport, debugTextLayer)
       } else {
         const textContent = await textContentPromise
         if (genRef.current !== gen) return
@@ -371,7 +372,7 @@ const PdfPage = memo(function PdfPage({
         console.error('[PdfPage] render failed:', e)
       }
     }
-  }, [page, zoom, rotation, forceOcr, cachedBoxes, pageStatus, documentId, runOcrForPage])
+  }, [page, zoom, rotation, forceOcr, debugTextLayer, cachedBoxes, pageStatus, documentId, runOcrForPage])
 
   useEffect(() => {
     renderPage()
