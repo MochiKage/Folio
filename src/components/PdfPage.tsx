@@ -71,10 +71,14 @@ const PdfPage = memo(function PdfPage({
    * Returns the word at (vx, vy) in page-local coordinates, or null.
    */
   const getWordAtPosition = useCallback(
-    (vx: number, vy: number): string | null => {
+    (clientX: number, clientY: number): string | null => {
       const div = textLayerRef.current
       if (!div) return null
 
+      // Client-space hit-testing: getBoundingClientRect() includes the
+      // layer's rotation transform, so this stays correct on rotated
+      // pages (page-local coordinates would not).
+      //
       // Word-level OCR spans have generous overlapping hit regions —
       // collect every span under the point and prefer the one whose
       // center is nearest to the click.
@@ -84,35 +88,31 @@ const PdfPage = memo(function PdfPage({
       const spans = div.querySelectorAll('span')
       for (const span of spans) {
         const el = span as HTMLElement
-        const left = parseFloat(el.style.left) || 0
-        const top = parseFloat(el.style.top) || 0
         const rect = el.getBoundingClientRect()
 
         // Right tolerance: +5 px accounts for the glyph-overhang problem
         // (the original "astrophysics → astrophysic" bug).
         if (
           rect.width > 0 &&
-          vx >= left - 2 &&
-          vx <= left + rect.width + 5 &&
-          vy >= top - 1 &&
-          vy <= top + rect.height + 1
+          clientX >= rect.left - 2 &&
+          clientX <= rect.right + 5 &&
+          clientY >= rect.top - 1 &&
+          clientY <= rect.bottom + 1
         ) {
           const text = (el.textContent || '').trim()
           if (!el.classList.contains('ocr-span') || el.dataset.word === '1') {
             // Native fragment spans are precise — return immediately.
             // OCR word spans compete by center distance.
             if (el.dataset.word !== '1') return text
-            const center = left + rect.width / 2
-            const dist = Math.abs(vx - center)
+            const center = rect.left + rect.width / 2
+            const dist = Math.abs(clientX - center)
             if (dist < bestDist) {
               bestDist = dist
               bestText = text
             }
           } else {
             // OCR line-span fallback: caret hit-testing
-            const divRect = div.getBoundingClientRect()
-            const caretWord =
-              getWordAtCaretPoint(divRect.left + vx, divRect.top + vy) ?? text
+            const caretWord = getWordAtCaretPoint(clientX, clientY) ?? text
             return caretWord
           }
         }
@@ -137,6 +137,19 @@ const PdfPage = memo(function PdfPage({
     [pageAnnotations],
   )
 
+  // OCR word spans carry a trailing space ("word␣") so cross-word
+  // selections keep the inter-word gaps — but a selection ending at a
+  // word boundary then copies with a stray trailing space. Trim trailing
+  // whitespace on native copy (interior spaces are preserved).
+  const handleTextLayerCopy = useCallback((e: React.ClipboardEvent) => {
+    const selection = window.getSelection()
+    if (!selection || selection.isCollapsed) return
+    const text = selection.toString()
+    if (text === text.trimEnd()) return
+    e.preventDefault()
+    e.clipboardData.setData('text/plain', text.trimEnd())
+  }, [])
+
   // Handle right-click on text layer → selection context menu
   const handleContextMenu = useCallback(
     (e: React.MouseEvent) => {
@@ -150,14 +163,10 @@ const PdfPage = memo(function PdfPage({
       if (!pageEl) return
 
       const viewport = viewportRef.current
-      const pageRect = pageEl.getBoundingClientRect()
 
-      // Viewport-local coords of the click (relative to page element)
-      const vx = e.clientX - pageRect.left
-      const vy = e.clientY - pageRect.top
-
-      // Exact word at the click position, from the PDF text span
-      const clickedWord = getWordAtPosition(vx, vy) || ''
+      // Exact word at the click position (client coordinates — the
+      // hit-testing handles the layer's rotation transform)
+      const clickedWord = getWordAtPosition(e.clientX, e.clientY) || ''
 
       const rects = selectionToPdfRects(selection, pageEl, viewport)
       const merged = mergeRects(rects.map((r) => r.rect))
@@ -239,15 +248,14 @@ const PdfPage = memo(function PdfPage({
       const boxes = await enqueueOcrJob(documentId, pageNumber, async () => {
         setPageStatus(documentId, pageNumber, 'loading')
         const cached = await api.getOcrResult(documentId, pageNumber)
-        // Reject stale-format cache entries (v < 2 predates the
-        // image-derived word_bounds) — they render misaligned; re-OCR
-        // regenerates them.
+        // Reject stale-format cache entries (v < 7 predates the refined
+        // two-pass tilt estimate) — they re-OCR automatically.
         if (
           cached &&
           cached.boxes.length > 0 &&
           cached.boxes.every(
             (b) =>
-              (b.v ?? 0) >= 2 &&
+              (b.v ?? 0) >= 7 &&
               (b.tx1 ?? 0) > (b.tx0 ?? 0) &&
               (b.chars?.length ?? 0) > 0,
           )
@@ -312,6 +320,14 @@ const PdfPage = memo(function PdfPage({
       if (!textLayerDiv || genRef.current !== gen) return
 
       textLayerDiv.innerHTML = ''
+      // Clear any OCR-layer rotation transform from a previous render
+      // (renderOcrTextLayer re-applies it when the page is rotated).
+      textLayerDiv.style.width = ''
+      textLayerDiv.style.height = ''
+      textLayerDiv.style.left = ''
+      textLayerDiv.style.top = ''
+      textLayerDiv.style.transform = ''
+      textLayerDiv.style.transformOrigin = ''
 
       /*
        * Set CSS variables required by PDF.js TextLayer.
@@ -335,8 +351,12 @@ const PdfPage = memo(function PdfPage({
 
       if (hasCached) {
         // OCR result (from store): render selectable spans from the
-        // stored PDF-space bounding boxes.
-        renderOcrTextLayer(textLayerDiv, cachedBoxes!, viewport, debugTextLayer)
+        // stored PDF-space bounding boxes. Layout happens in rotation-0
+        // space; 90°/270° use vertical-writing spans laid out directly
+        // in rotated space (browser vertical-text selection is exact,
+        // CSS-rotated layers drop characters between highlight and copy).
+        const viewport0 = page.getViewport({ scale: zoom, rotation: 0 })
+        renderOcrTextLayer(textLayerDiv, cachedBoxes!, viewport0, viewport, debugTextLayer)
       } else {
         const textContent = await textContentPromise
         if (genRef.current !== gen) return
@@ -397,6 +417,7 @@ const PdfPage = memo(function PdfPage({
         className="pdf-text-layer absolute inset-0"
         onContextMenu={handleContextMenu}
         onDoubleClick={handleDoubleClick}
+        onCopy={handleTextLayerCopy}
       />
     </div>
   )

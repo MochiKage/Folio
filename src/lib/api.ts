@@ -263,9 +263,22 @@ export interface OcrBox {
   /** Per-word horizontal spans as fractions (0..1) of the tight box width,
    *  aligned with the whitespace-separated words of `text`. Extracted from
    *  the source image's column profile — pixel evidence, preferred over
-   *  `chars` (CTC timing) for word placement. Empty when gaps are ambiguous. */
+   *  `chars` (CTC timing) for word placement. For skewed lines the profile
+   *  runs along the line direction and fractions are converted back to
+   *  tight-box x. Empty when gaps are ambiguous. */
   word_bounds?: [number, number][]
-  /** Cache format version — entries with v < 2 predate image-derived word_bounds. */
+  /** The line's ink height (skew-independent), PDF pt. The tight height
+   *  inflates on skewed lines, so the rendered font size derives from
+   *  this. Absent (0) in caches older than v4. */
+  line_h?: number
+  /** The page's text tilt angle in degrees (display clockwise-positive,
+   *  0 = level) — word spans rotate with the text on skewed pages.
+   *  Refined two-pass estimate (v7): first-pass median + the residual
+   *  measured after deskewing — errors ≤ 0.1°. Absent (0) in older
+   *  caches. */
+  angle?: number
+  /** Cache format version — entries with v < 7 predate the refined
+   *  two-pass tilt estimate. */
   v?: number
 }
 

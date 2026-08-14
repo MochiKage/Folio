@@ -1,6 +1,7 @@
 import { useAppStore } from '../stores/appStore'
 import { usePdfStore } from '../stores/pdfStore'
 import { useOcrStore } from '../stores/ocrStore'
+import { requestRotation } from '../lib/rotationBus'
 
 const presets = [
   { label: 'Fit',  zoom: -1 },
@@ -26,6 +27,7 @@ export default function StatusBar() {
   const activeDoc = usePdfStore((s) =>
     s.documents.find((d) => d.id === s.activeDocId)
   )
+  const rotation = usePdfStore((s) => s.rotation)
   const forceOcr = useOcrStore((s) => s.forceOcr)
   const toggleForceOcr = useOcrStore((s) => s.toggleForceOcr)
   const setPageStatus = useOcrStore((s) => s.setPageStatus)
@@ -84,6 +86,16 @@ export default function StatusBar() {
             title="Force OCR mode — run PaddleOCR on this page even if it has embedded text (scanned pages are OCR'd automatically)"
           >
             OCR
+          </button>
+        )}
+        {/* Page rotation — cycles 0° → 90° → 180° → 270° */}
+        {activeDoc && (
+          <button
+            onClick={() => requestRotation((rotation + 90) % 360)}
+            className="rounded px-1.5 py-0.5 text-[10px] text-[var(--text)]/30 transition-colors hover:bg-[var(--border)]/30 hover:text-[var(--text)]/70"
+            title={`Rotate page 90° clockwise, keeping the reading position (current: ${rotation}°)`}
+          >
+            ↻ {rotation}°
           </button>
         )}
       </div>

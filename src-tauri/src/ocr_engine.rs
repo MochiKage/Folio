@@ -58,10 +58,25 @@ pub struct OcrBox {
     /// Extracted from the SOURCE image's column profile inside the tight
     /// box: word gaps are the wide zero-ink runs, so boundaries come from
     /// pixel evidence instead of CTC timing (which drifts on
-    /// variable-width glyphs). Empty when the gaps are ambiguous — the
+    /// variable-width glyphs). For skewed lines the profile is projected
+    /// along the line direction, and the fractions are converted back to
+    /// tight-box x positions. Empty when the gaps are ambiguous — the
     /// frontend falls back to `chars` (CTC peak midpoints).
     #[serde(default)]
     pub word_bounds: Vec<[f32; 2]>,
+    /// The line's ink height (skew-independent), in the same units as the
+    /// tight box (image px in the engine; PDF pt after command mapping).
+    /// The tight height inflates on skewed lines (axis-aligned extent of
+    /// a tilted band), so the frontend derives the rendered font size
+    /// from this, not from tight_h. 0 for older caches (v < 3).
+    #[serde(default)]
+    pub line_h: f32,
+    /// The page's text tilt angle in degrees (display clockwise-positive,
+    /// 0 = level) — the median of the detected line angles. The frontend
+    /// rotates word spans with the text on skewed pages. Absent (0) in
+    /// caches older than v6.
+    #[serde(default)]
+    pub angle: f32,
     /// Cache format version — bumped when the box fields change meaning.
     #[serde(default)]
     pub v: i32,
@@ -214,36 +229,19 @@ impl OcrEngine {
         self.recognize_image(&src, width, height)
     }
 
-    /// Shared pipeline body: detection + recognition on an RGB image.
-    /// Returns (boxes in image-pixel coordinates y-down, in reading order,
-    /// and the image dimensions for pixel→PDF mapping).
-    fn recognize_image(
-        &self,
-        src: &RgbImage,
-        src_w: u32,
-        src_h: u32,
-    ) -> Result<(Vec<OcrBox>, (u32, u32)), String> {
-        let t0 = Instant::now();
-
-        // ── Detection ──
+    /// Run detection on an RGB image; returns the probability map and
+    /// its dimensions (full input resolution, verified).
+    fn detect(&self, src: &RgbImage) -> Result<(Vec<f32>, usize, usize), String> {
         let (det_input, rw, rh) = det_preprocess(src);
-        let t1 = Instant::now();
-
         let det_tensor = Tensor::from_array((vec![1i64, 3, rh as i64, rw as i64], det_input))
             .map_err(|e| format!("det tensor build failed: {}", e))?;
-        let (pred, t2) = {
-            let mut det = self.det_session.lock().map_err(|e| e.to_string())?;
-            let det_out = det
-                .run(ort::inputs![self.det_input_name.as_str() => det_tensor])
-                .map_err(|e| format!("det inference failed: {}", e))?;
-            let (_, pred): (_, &[f32]) = det_out[self.det_output_name.as_str()]
-                .try_extract_tensor()
-                .map_err(|e| format!("det output extract failed: {}", e))?;
-            (pred.to_vec(), Instant::now())
-        };
-
-        // The det model outputs the probability map at FULL input resolution
-        // (verified: 640×640 in → 640×640 out).
+        let mut det = self.det_session.lock().map_err(|e| e.to_string())?;
+        let det_out = det
+            .run(ort::inputs![self.det_input_name.as_str() => det_tensor])
+            .map_err(|e| format!("det inference failed: {}", e))?;
+        let (_, pred): (_, &[f32]) = det_out[self.det_output_name.as_str()]
+            .try_extract_tensor()
+            .map_err(|e| format!("det output extract failed: {}", e))?;
         let (ph, pw) = (rh, rw);
         if pred.len() != ph * pw {
             return Err(format!(
@@ -252,15 +250,71 @@ impl OcrEngine {
                 ph * pw
             ));
         }
+        Ok((pred.to_vec(), ph, pw))
+    }
+
+    /// Shared pipeline body: detection + recognition on an RGB image.
+    /// Returns (boxes in image-pixel coordinates y-down, in reading order,
+    /// and the image dimensions for pixel→PDF mapping).
+    ///
+    /// Skewed pages (median line angle ≥ 0.5°) get a deskew pass: the
+    /// image is rotated so the text is level, then detection +
+    /// recognition run on the rotated image — recognition quality on
+    /// tilted scans improves sharply (the 1.5° fixture misread
+    /// "detection" as "dtection" before). Boxes are mapped back to
+    /// original-image coordinates afterwards, so the frontend contract
+    /// (image space + tight-x word fractions) is unchanged.
+    fn recognize_image(
+        &self,
+        src: &RgbImage,
+        src_w: u32,
+        src_h: u32,
+    ) -> Result<(Vec<OcrBox>, (u32, u32)), String> {
+        let t0 = Instant::now();
+
+        // ── Detection (pass 1) — also yields the page skew angle ──
+        let (pred, ph, pw) = self.detect(src)?;
         let quads = db_postprocess(&pred, ph, pw, src_w as usize, src_h as usize);
-        let t3 = Instant::now();
+
+        // ── Deskew ──
+        // `angle1` (y-down atan2) is negative for content tilted
+        // counterclockwise; rotate_image is clockwise-positive, so the
+        // leveling rotation is -angle1.
+        let angle1 = median_quad_angle(&quads);
+        let rot: Option<RgbImage> = if angle1.abs() >= 0.5f32.to_radians() {
+            Some(rotate_image(src, -angle1))
+        } else {
+            None
+        };
+        let work: &RgbImage = rot.as_ref().unwrap_or(src);
+        let (work_w, work_h) = (work.width(), work.height());
+
+        let quads = if rot.is_some() {
+            let (pred2, ph2, pw2) = self.detect(work)?;
+            db_postprocess(&pred2, ph2, pw2, work_w as usize, work_h as usize)
+        } else {
+            quads
+        };
+
+        // Refined tilt estimate for display: the first-pass median has
+        // per-line PCA noise; the second-pass median (≈0 when the deskew
+        // was right) captures the leftover, so the sum is a much better
+        // estimate of the true content tilt. Box mapping below still
+        // uses angle1 — the rotation actually applied.
+        let angle = if rot.is_some() {
+            angle1 + median_quad_angle(&quads)
+        } else {
+            angle1
+        };
 
         // ── Recognition ──
+        let src_center = ((src_w as f32 - 1.0) / 2.0, (src_h as f32 - 1.0) / 2.0);
+        let rot_center = ((work_w as f32 - 1.0) / 2.0, (work_h as f32 - 1.0) / 2.0);
         let mut boxes: Vec<OcrBox> = Vec::with_capacity(quads.len());
         for batch in quads.chunks(REC_BATCH_NUM) {
             let crops: Vec<RgbImage> = batch
                 .iter()
-                .map(|(q, _, _)| rotate_crop(src, &q.corners))
+                .map(|(q, _, _)| rotate_crop(work, &q.corners))
                 .collect();
             let (logits, timesteps, batch_size) = self.rec_infer_batch(&crops)?;
             let classes = logits.len() / (timesteps * batch_size);
@@ -281,57 +335,126 @@ impl OcrEngine {
                     .iter()
                     .map(|t| *t as f32 / timesteps as f32)
                     .collect();
-                // Word placement from pixel evidence: split the source
+                // Word placement from pixel evidence: split the working
                 // image's column profile at the wide zero-ink runs. The
                 // CTC text only supplies the word count — the boundaries
                 // themselves are real inter-word gaps in the pixels.
                 let word_count = text.split(' ').filter(|s| !s.is_empty()).count();
                 let horizontal = tight[2] - tight[0] > tight[3] - tight[1];
-                // Skew guard: a tilted line inflates the axis-aligned
-                // tight height (1.5° → ~2.2×); the expanded sample band
-                // would then catch neighboring lines' ink and corrupt the
-                // gaps. Skip pixel extraction — CTC fallback is safer.
+                // Skew detection (deskewed images have horizontal lines;
+                // this only fires when deskewing was skipped or failed):
+                // a tilted line inflates the axis-aligned tight height
+                // (1.5° → ~2.2×). Skewed lines use a directional
+                // projection profile (strips perpendicular to the line
+                // direction) — axis-aligned columns would smear the gaps
+                // diagonally and corrupt them.
                 let skewed = tight[3] - tight[1] > 1.4 * line_h;
-                let profile: Vec<u32> = if horizontal && !skewed {
-                    source_word_profile(src, *tight, 0.35 * line_h)
+                let profile: Vec<u32> = if horizontal {
+                    if skewed {
+                        skewed_word_profile(work, quad, 0.85 * line_h)
+                    } else {
+                        source_word_profile(work, *tight, 0.35 * line_h)
+                    }
                 } else {
                     Vec::new()
                 };
                 let word_bounds: Vec<[f32; 2]> = word_segments(&profile, word_count)
-                    .map(|segs| segs.into_iter().map(|(a, b)| [a, b]).collect())
+                    .map(|segs| {
+                        segs.into_iter()
+                            .map(|(a, b)| {
+                                if skewed {
+                                    // Profile fractions run along the line
+                                    // direction; convert to tight-box x
+                                    // fractions (the frontend contract).
+                                    [x_frac_at(a, quad, *tight), x_frac_at(b, quad, *tight)]
+                                } else {
+                                    [a, b]
+                                }
+                            })
+                            .collect()
+                    })
                     .unwrap_or_default();
                 let x0 = quad.corners.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
                 let y0 = quad.corners.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
                 let x1 = quad.corners.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
                 let y1 = quad.corners.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
-                boxes.push(OcrBox {
-                    text,
-                    x0,
-                    y0,
-                    x1,
-                    y1,
-                    confidence: conf,
-                    tx0: tight[0],
-                    ty0: tight[1],
-                    tx1: tight[2],
-                    ty1: tight[3],
-                    chars,
-                    word_bounds,
-                    v: 2,
-                });
+                if rot.is_some() {
+                    // Map the box from rotated-image space back to
+                    // original-image space (inverse of rotate_image).
+                    // line_h, word_bounds and chars are invariant.
+                    let theta = -angle; // the rotation applied above
+                    let map = |p: (f32, f32)| map_rot_to_src(p, src_center, rot_center, theta);
+                    let cs: Vec<(f32, f32)> = quad.corners.iter().map(|&p| map(p)).collect();
+                    let mx0 = cs.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
+                    let my0 = cs.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
+                    let mx1 = cs.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
+                    let my1 = cs.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
+                    let tc = [
+                        map((tight[0], tight[1])),
+                        map((tight[2], tight[1])),
+                        map((tight[2], tight[3])),
+                        map((tight[0], tight[3])),
+                    ];
+                    let (mut tx0, mut ty0, mut tx1, mut ty1) = (
+                        f32::INFINITY,
+                        f32::INFINITY,
+                        f32::NEG_INFINITY,
+                        f32::NEG_INFINITY,
+                    );
+                    for &(px, py) in &tc {
+                        tx0 = tx0.min(px);
+                        ty0 = ty0.min(py);
+                        tx1 = tx1.max(px);
+                        ty1 = ty1.max(py);
+                    }
+                    boxes.push(OcrBox {
+                        text,
+                        x0: mx0,
+                        y0: my0,
+                        x1: mx1,
+                        y1: my1,
+                        confidence: conf,
+                        tx0,
+                        ty0,
+                        tx1,
+                        ty1,
+                        chars,
+                        word_bounds,
+                        line_h: *line_h,
+                        angle: angle.to_degrees(),
+                        v: 7,
+                    });
+                } else {
+                    boxes.push(OcrBox {
+                        text,
+                        x0,
+                        y0,
+                        x1,
+                        y1,
+                        confidence: conf,
+                        tx0: tight[0],
+                        ty0: tight[1],
+                        tx1: tight[2],
+                        ty1: tight[3],
+                        chars,
+                        word_bounds,
+                        line_h: *line_h,
+                        angle: angle.to_degrees(),
+                        v: 7,
+                    });
+                }
             }
         }
         let t4 = Instant::now();
 
         log::info!(
-            "[OCR] page {:?}x{}: det={} boxes, prep {:?}, det {:?}, post {:?}, rec {:?}",
+            "[OCR] page {:?}x{}: det={} boxes, angle {:.2}°, deskewed {}, total {:?}",
             src_w,
             src_h,
             boxes.len(),
-            t1 - t0,
-            t2 - t1,
-            t3 - t2,
-            t4 - t3
+            angle.to_degrees(),
+            rot.is_some(),
+            t4 - t0
         );
         Ok((boxes, (src_w, src_h)))
     }
@@ -734,6 +857,63 @@ fn median(vals: &mut [f32]) -> f32 {
     vals[vals.len() / 2]
 }
 
+/// Median line angle of the detected quads (radians; y-down atan2, so
+/// lines sloping up to the right are negative). Only horizontal-ish
+/// lines (width > 2×height) vote — vertical text and tiny boxes cannot
+/// skew the estimate.
+fn median_quad_angle(quads: &[(Quad, [f32; 4], f32)]) -> f32 {
+    let mut angles: Vec<f32> = quads
+        .iter()
+        .filter(|(q, _, _)| q.width() > 2.0 * q.height())
+        .map(|(q, _, _)| {
+            let [tl, tr, _, _] = q.corners;
+            (tr.1 - tl.1).atan2(tr.0 - tl.0)
+        })
+        .collect();
+    if angles.is_empty() {
+        return 0.0;
+    }
+    angles.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    angles[angles.len() / 2]
+}
+
+/// Rotate the image by `theta` radians about its center onto a canvas
+/// sized to the rotated bounding box. Positive theta = clockwise as
+/// displayed (verified by the quarter-turn test: +90° maps the top-left
+/// content to the top-right). Pixels outside the source clamp to the
+/// border (the page margins are white, so the corners fill white).
+fn rotate_image(src: &RgbImage, theta: f32) -> RgbImage {
+    let (w, h) = src.dimensions();
+    let (wf, hf) = (w as f32, h as f32);
+    let (sin, cos) = theta.sin_cos();
+    let nw = (wf * cos.abs() + hf * sin.abs()).round() as u32;
+    let nh = (hf * cos.abs() + wf * sin.abs()).round() as u32;
+    let c0 = ((wf - 1.0) / 2.0, (hf - 1.0) / 2.0);
+    let c1 = ((nw as f32 - 1.0) / 2.0, (nh as f32 - 1.0) / 2.0);
+
+    let mut out = RgbImage::from_pixel(nw, nh, Rgb([255, 255, 255]));
+    for y in 0..nh {
+        for x in 0..nw {
+            let u = x as f32 - c1.0;
+            let v = y as f32 - c1.1;
+            let sx = c0.0 + u * cos + v * sin;
+            let sy = c0.1 - u * sin + v * cos;
+            out.put_pixel(x, y, bilinear_sample(src, sx, sy, w, h));
+        }
+    }
+    out
+}
+
+/// Map a point from the rotated (deskewed) image back to original-image
+/// coordinates — the inverse of rotate_image's content transform.
+fn map_rot_to_src(p: (f32, f32), src_c: (f32, f32), rot_c: (f32, f32), theta: f32) -> (f32, f32) {
+    let (u, v) = (p.0 - rot_c.0, p.1 - rot_c.1);
+    (
+        src_c.0 + u * theta.cos() + v * theta.sin(),
+        src_c.1 - u * theta.sin() + v * theta.cos(),
+    )
+}
+
 /// Column profile of dark pixels inside `tight` (source-image pixels):
 /// count of dark pixels per column. Computed on the SOURCE image, not
 /// the detection map — the det map is downscaled ~2.5× and dilated, at
@@ -768,17 +948,80 @@ fn source_word_profile(src: &RgbImage, tight: [f32; 4], expand: f32) -> Vec<u32>
             }
         }
     }
-    // Noise suppression: scan speckles are 1-2 isolated dark pixels, real
-    // strokes occupy ≥3 rows of the sampled band (even "i" dots and
-    // periods). Zeroing sparse columns keeps word gaps intact on noisy
-    // scans — verified: a 13-word line on a speckled scan rejected the
-    // gap split at count≥1 (8px fake splits) but accepted at count≥3.
+    suppress_noise(&mut profile);
+    profile
+}
+
+/// Directional column profile for skewed lines: bins are strips
+/// PERPENDICULAR to the line direction (projection onto the padded
+/// quad's u-axis), so word gaps are found across the tilt instead of
+/// being smeared diagonally in axis-aligned columns. The bin count per
+/// strip uses the same source luminance threshold and noise suppression
+/// as `source_word_profile`. The returned fractions are relative to the
+/// FULL quad width (u ∈ [0, w]) — `recognize` converts them to tight-x
+/// fractions, so the frontend renders with the same axis-aligned path.
+fn skewed_word_profile(src: &RgbImage, quad: &Quad, v_limit: f32) -> Vec<u32> {
+    let [tl, tr, _, bl] = quad.corners; // source px
+    let (ex, ey) = (tr.0 - tl.0, tr.1 - tl.1);
+    let w = (ex * ex + ey * ey).sqrt().max(1.0);
+    let (ux, uy) = (ex / w, ey / w);
+    let (vx, vy) = (-uy, ux);
+    // Half-height of the quad along v (tl → bl edge).
+    let hv = ((bl.0 - tl.0).powi(2) + (bl.1 - tl.1).powi(2)).sqrt() / 2.0;
+    let (iw, ih) = src.dimensions();
+
+    let (bx0, bx1, by0, by1) = quad.bbox();
+    let x0 = bx0.floor().max(0.0) as u32;
+    let x1 = (bx1.ceil() as u32).min(iw.saturating_sub(1));
+    let y0 = by0.floor().max(0.0) as u32;
+    let y1 = (by1.ceil() as u32).min(ih.saturating_sub(1));
+
+    let mut profile = vec![0u32; w as usize];
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let px = src.get_pixel(x, y);
+            let lum = 0.299 * px[0] as f32 + 0.587 * px[1] as f32 + 0.114 * px[2] as f32;
+            if lum >= 160.0 {
+                continue;
+            }
+            let dx = x as f32 - tl.0;
+            let dy = y as f32 - tl.1;
+            let u = dx * ux + dy * uy;
+            let v = dx * vx + dy * vy;
+            // Keep only the line's own ink band (v measured from the
+            // quad center): rejects neighboring lines that bleed into
+            // the padded quad's corners.
+            if u < 0.0 || u >= w || (v - hv).abs() > v_limit {
+                continue;
+            }
+            profile[u as usize] += 1;
+        }
+    }
+    suppress_noise(&mut profile);
+    profile
+}
+
+/// Noise suppression: scan speckles are 1-2 isolated dark pixels, real
+/// strokes occupy ≥3 rows of the sampled band (even "i" dots and
+/// periods). Zeroing sparse columns keeps word gaps intact on noisy
+/// scans — verified: a 13-word line on a speckled scan rejected the
+/// gap split at count≥1 (8px fake splits) but accepted at count≥3.
+fn suppress_noise(profile: &mut [u32]) {
     for p in profile.iter_mut() {
         if *p < 3 {
             *p = 0;
         }
     }
-    profile
+}
+
+/// x position at profile fraction `f` (along the padded quad's u-axis,
+/// 0 = tl, 1 = tr), normalized to the tight box width. Used to convert
+/// skewed-profile segments back to the frontend's tight-x-fraction
+/// contract.
+fn x_frac_at(f: f32, quad: &Quad, tight: [f32; 4]) -> f32 {
+    let [tl, tr, _, _] = quad.corners;
+    let x = tl.0 + f * (tr.0 - tl.0);
+    (x - tight[0]) / (tight[2] - tight[0])
 }
 
 /// Split a line's column ink profile into word segments.
@@ -804,8 +1047,10 @@ fn word_segments(profile: &[u32], word_count: usize) -> Option<Vec<(f32, f32)>> 
         return Some(vec![(0.0, 1.0)]);
     }
 
-    // Zero-column runs. All runs are interior: the tight extent starts
-    // and ends on ink by construction.
+    // Zero-column runs. Edge runs are skipped: the tight-box profile
+    // starts/ends on ink, but the skewed (quad-projected) profile has
+    // leading/trailing padding zones from the unclip distance that must
+    // not be mistaken for word gaps.
     let mut runs: Vec<(usize, usize)> = Vec::new();
     let mut i = 0;
     while i < n {
@@ -814,7 +1059,9 @@ fn word_segments(profile: &[u32], word_count: usize) -> Option<Vec<(f32, f32)>> 
             while i < n && profile[i] == 0 {
                 i += 1;
             }
-            runs.push((start, i - 1));
+            if start > 0 && i < n {
+                runs.push((start, i - 1));
+            }
         } else {
             i += 1;
         }
@@ -835,17 +1082,23 @@ fn word_segments(profile: &[u32], word_count: usize) -> Option<Vec<(f32, f32)>> 
         return None;
     }
 
-    // Chosen gaps in reading order → segments between them.
+    // Chosen gaps in reading order → segments between them. Segments are
+    // clamped to the ink extent (first/last nonzero column) — the skewed
+    // (quad-projected) profile has padding zones at both ends that belong
+    // to neither word. For the tight-box profile the ink extent IS the
+    // full range, so this is a no-op.
     let mut gaps: Vec<(usize, usize)> = sorted[..k].to_vec();
     gaps.sort_unstable_by_key(|&(s, _)| s);
+    let first_ink = profile.iter().position(|&c| c > 0).unwrap_or(0);
+    let last_ink = profile.iter().rposition(|&c| c > 0).unwrap_or(n - 1);
     let nf = n as f32;
     let mut segs = Vec::with_capacity(word_count);
-    let mut left = 0usize;
+    let mut left = first_ink;
     for &(s, e) in &gaps {
         segs.push((left as f32 / nf, s as f32 / nf));
         left = e + 1;
     }
-    segs.push((left as f32 / nf, 1.0));
+    segs.push((left as f32 / nf, (last_ink + 1) as f32 / nf));
     Some(segs)
 }
 
@@ -1186,5 +1439,81 @@ mod tests {
             profile[c] = 4;
         }
         assert!(word_segments(&profile, 3).is_none());
+    }
+
+    #[test]
+    fn test_word_segments_skips_edge_runs() {
+        // Skewed-profile shape: padding zeros at both ends, then "aa bb"
+        // with a 4px word gap. The leading (6px) and trailing (6px)
+        // padding runs must not be selected as word gaps.
+        let mut profile = vec![0u32; 26];
+        for c in [6, 7, 8, 9, 10, 14, 15, 16, 17, 18, 19] {
+            profile[c] = 5;
+        }
+        let segs = word_segments(&profile, 2).unwrap();
+        assert_eq!(segs.len(), 2);
+        assert!((segs[0].0 - 6.0 / 26.0).abs() < 1e-6);
+        assert!((segs[0].1 - 11.0 / 26.0).abs() < 1e-6);
+        assert!((segs[1].0 - 14.0 / 26.0).abs() < 1e-6);
+        assert!((segs[1].1 - 20.0 / 26.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_rotate_image_quarter_turn() {
+        // 2x3 image with one black pixel at top-left; rotate 90°
+        // clockwise: dims swap to 3x2 and the black content lands
+        // top-right.
+        let mut img = RgbImage::from_pixel(2, 3, Rgb([255, 255, 255]));
+        img.put_pixel(0, 0, Rgb([0, 0, 0]));
+        let rot = rotate_image(&img, std::f32::consts::FRAC_PI_2);
+        assert_eq!(rot.dimensions(), (3, 2));
+        assert_eq!(rot.get_pixel(2, 0), &Rgb([0, 0, 0]));
+        assert_eq!(rot.get_pixel(0, 0), &Rgb([255, 255, 255]));
+        assert_eq!(rot.get_pixel(1, 1), &Rgb([255, 255, 255]));
+    }
+
+    #[test]
+    fn test_map_rot_to_src_roundtrip() {
+        // For a 90° rotation the mapping is exact: a rotated-space
+        // point maps back to its source coordinates.
+        let src_c = ((2.0f32 - 1.0) / 2.0, (3.0f32 - 1.0) / 2.0);
+        let rot_c = ((3.0f32 - 1.0) / 2.0, (2.0f32 - 1.0) / 2.0);
+        let back = map_rot_to_src((2.0, 0.0), src_c, rot_c, std::f32::consts::FRAC_PI_2);
+        assert!((back.0 - 0.0).abs() < 1e-4);
+        assert!((back.1 - 0.0).abs() < 1e-4);
+        // Center maps to center at any angle
+        let c = map_rot_to_src(rot_c, src_c, rot_c, 0.03);
+        assert!((c.0 - src_c.0).abs() < 1e-4);
+        assert!((c.1 - src_c.1).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_median_quad_angle() {
+        let mk = |dx: f32, dy: f32, h: f32| {
+            let w = (dx * dx + dy * dy).sqrt();
+            let (ux, uy) = (dx / w, dy / w);
+            let (vx, vy) = (-uy, ux);
+            (
+                Quad {
+                    corners: [
+                        (0.0, 0.0),
+                        (dx, dy),
+                        (dx + vx * h, dy + vy * h),
+                        (vx * h, vy * h),
+                    ],
+                },
+                [0.0; 4],
+                0.0f32,
+            )
+        };
+        // Two horizontal-ish lines at -1.5° and -2°, plus a tall narrow
+        // box (vertical text) that must be ignored.
+        let quads = vec![
+            mk(1000.0, -26.2, 10.0), // ≈ -1.5°
+            mk(1000.0, -34.9, 10.0), // ≈ -2°
+            mk(0.0, -10.0, 40.0),    // vertical — filtered out
+        ];
+        let angle = median_quad_angle(&quads).to_degrees();
+        assert!(angle < -1.4 && angle > -2.1, "angle = {}", angle);
     }
 }

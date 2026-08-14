@@ -9,6 +9,7 @@ import PdfPage from './PdfPage'
 import { open } from '@tauri-apps/plugin-dialog'
 import * as api from '../lib/api'
 import { generateId } from '../lib/selection'
+import { setRotationHandler } from '../lib/rotationBus'
 
 // How many pages ABOVE and BELOW the viewport to pre-render
 const PAGE_BUFFER = 2
@@ -19,10 +20,20 @@ export default function ReaderViewport() {
   const pendingDocRef = useRef<string | null>(null)
   const zoomRafRef = useRef<number | null>(null)
   const observerRef = useRef<IntersectionObserver | null>(null)
+  /** Reading anchor captured before a rotation — used to restore the
+   *  scroll position once the pages re-render at the new rotation. */
+  const pendingAnchorRef = useRef<{
+    pageNum: number
+    pdfX: number
+    pdfY: number
+    screenX: number
+    screenY: number
+    oldPageH: number
+  } | null>(null)
 
   const focusMode = useAppStore((s) => s.focusMode)
   const toggleFocusMode = useAppStore((s) => s.toggleFocusMode)
-  const { activePage, zoom, rotation, setPage, setZoom, addDocument, activeDocId } = usePdfStore()
+  const { activePage, zoom, rotation, setPage, setZoom, setRotation, addDocument, activeDocId } = usePdfStore()
   const { pdfDoc, loading, error, loadPdfFromPath } = usePdfLoader()
   const fetchAnnotations = useAnnotationStore((s) => s.fetchForDocument)
 
@@ -268,6 +279,113 @@ export default function ReaderViewport() {
     return () => window.removeEventListener('keydown', onKey)
   }, [handleOpenFile, setZoom])
 
+  // ─── Rotation with reading-position preservation ───
+  // Before rotating, capture the PDF-space point at the viewport center
+  // (rotation-invariant). After the pages re-render at the new rotation,
+  // re-derive the point's content position and shift the scroll so the
+  // point stays at the same screen position.
+  const handleRotate = useCallback(
+    async (next: number) => {
+      const container = containerRef.current
+      if (!container || !pdfDoc) {
+        setRotation(next)
+        return
+      }
+      const rect = container.getBoundingClientRect()
+      const cx = rect.left + rect.width / 2
+      const cy = rect.top + rect.height / 2
+
+      // Find the page under the viewport center
+      let pageNum = 0
+      for (const [pn, el] of pageRefs.current) {
+        const pr = el.getBoundingClientRect()
+        if (cx >= pr.left && cx <= pr.right && cy >= pr.top && cy <= pr.bottom) {
+          pageNum = pn
+          break
+        }
+      }
+      if (!pageNum) {
+        setRotation(next)
+        return
+      }
+
+      const pageEl = pageRefs.current.get(pageNum)!
+      const pr = pageEl.getBoundingClientRect()
+      const page = await pdfDoc.getPage(pageNum)
+      const vp = page.getViewport({ scale: effectiveZoom, rotation })
+      const [pdfX, pdfY] = vp.convertToPdfPoint(cx - pr.left, cy - pr.top)
+
+      pendingAnchorRef.current = {
+        pageNum,
+        pdfX,
+        pdfY,
+        screenX: cx - rect.left,
+        screenY: cy - rect.top,
+        oldPageH: pr.height,
+      }
+      setRotation(next)
+    },
+    [pdfDoc, effectiveZoom, rotation, setRotation],
+  )
+
+  useEffect(() => {
+    setRotationHandler((next) => void handleRotate(next))
+    return () => setRotationHandler(null)
+  }, [handleRotate])
+
+  // After a rotation, restore the reading position once the anchor page
+  // has re-rendered at the new rotation (heights settle within a few
+  // frames; poll with rAF until two consecutive frames agree).
+  useEffect(() => {
+    const anchor = pendingAnchorRef.current
+    if (!anchor) return
+    let raf = 0
+    let frames = 0
+    let prevH = 0
+    let settled = 0
+    const apply = () => {
+      frames++
+      const container = containerRef.current
+      const pageEl = pageRefs.current.get(anchor.pageNum)
+      if (!container || !pageEl) {
+        if (frames < 90) raf = requestAnimationFrame(apply)
+        return
+      }
+      const pr = pageEl.getBoundingClientRect()
+      settled = Math.abs(pr.height - prevH) < 1 ? settled + 1 : 0
+      prevH = pr.height
+      if (frames < 3 || (settled < 2 && frames < 90)) {
+        raf = requestAnimationFrame(apply)
+        return
+      }
+      void (async () => {
+        try {
+          if (!pdfDoc) return
+          const page = await pdfDoc.getPage(anchor.pageNum)
+          const newVp = page.getViewport({ scale: effectiveZoom, rotation })
+          const [nvx, nvy] = newVp.convertToViewportPoint(anchor.pdfX, anchor.pdfY)
+          const rect2 = container.getBoundingClientRect()
+          // Off-screen placeholders above the anchor still hold
+          // pre-rotation heights; correct them with the per-page delta
+          // (exact for uniform documents, approximate otherwise).
+          const staleAbove = Array.from(pageRefs.current.keys()).filter(
+            (pn) => pn < anchor.pageNum && !visiblePages.has(pn),
+          ).length
+          const delta = pr.height - anchor.oldPageH
+          const newContentY =
+            pr.top - rect2.top + container.scrollTop + nvy + staleAbove * delta
+          container.scrollTop = newContentY - anchor.screenY
+          const newContentX = pr.left - rect2.left + container.scrollLeft + nvx
+          container.scrollLeft = newContentX - anchor.screenX
+        } finally {
+          pendingAnchorRef.current = null
+        }
+      })()
+    }
+    raf = requestAnimationFrame(apply)
+    return () => cancelAnimationFrame(raf)
+  }, [rotation, effectiveZoom, visiblePages, pdfDoc])
+
   // ─── Empty state ───
   if (!pdfDoc || loading) {
     return (
@@ -326,7 +444,7 @@ export default function ReaderViewport() {
               ref={(el) => { if (el) pageRefs.current.set(pageNum, el); else pageRefs.current.delete(pageNum) }}
               data-page-number={pageNum}
               style={height ? { minHeight: height } : undefined}
-              className="flex w-full items-center justify-center"
+              className="flex w-full items-center justify-start"
             >
               {visiblePages.has(pageNum) ? (
                 <PdfPageLazy

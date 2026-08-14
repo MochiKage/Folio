@@ -145,24 +145,59 @@ export function renderDebugTextLayer(
 export function renderOcrTextLayer(
   container: HTMLDivElement,
   boxes: OcrBox[],
-  viewport: PageViewport,
+  /** Rotation-0 viewport — spans are laid out in unrotated space. */
+  viewport0: PageViewport,
+  /** The displayed (rotated) viewport — used for 90°/270° layouts. */
+  viewportRot: PageViewport,
   debug = false,
 ): void {
   container.innerHTML = ''
+
+  const rot = ((viewportRot.rotation % 360) + 360) % 360
+  if (rot === 180) {
+    // 180°: lay out in rotation-0 space and flip the whole layer about
+    // its center — the canvas has the same dimensions, and horizontal
+    // selection keeps working at 180°.
+    const w0 = viewport0.width
+    const h0 = viewport0.height
+    container.style.width = `${w0}px`
+    container.style.height = `${h0}px`
+    container.style.left = '0px'
+    container.style.top = '0px'
+    container.style.transform = 'rotate(180deg)'
+    container.style.transformOrigin = 'center'
+  } else {
+    // 0°: plain layout. 90°/270°: vertical-writing spans laid out
+    // DIRECTLY in rotated space (no container rotation) — the browser's
+    // native vertical-text selection maps drags and ranges exactly,
+    // whereas selecting inside a CSS-rotated container drops characters
+    // between the highlight and the copied text.
+    container.style.width = ''
+    container.style.height = ''
+    container.style.left = ''
+    container.style.top = ''
+    container.style.transform = ''
+    container.style.transformOrigin = ''
+  }
 
   if (boxes.length === 0) {
     console.warn('[OCR] renderOcrTextLayer: 0 boxes to render')
     return
   }
 
+  const vertical = rot === 90 || rot === 270
   for (const box of boxes) {
+    if (vertical) {
+      renderVerticalLine(container, box, viewportRot, debug, rot)
+      continue
+    }
     const hasTight =
       (box.tx0 ?? 0) < (box.tx1 ?? 0) && (box.ty0 ?? 0) < (box.ty1 ?? 0)
     const hasChars = (box.chars?.length ?? 0) > 0 && box.chars!.length === box.text.length
     if (hasTight && hasChars) {
-      renderWordSpans(container, box, viewport, debug)
+      renderWordSpans(container, box, viewport0, debug)
     } else {
-      renderLineSpan(container, box, viewport, debug)
+      renderLineSpan(container, box, viewport0, debug)
     }
   }
 }
@@ -184,6 +219,13 @@ function createFittedSpan(
   fontSize: number,
   debug: boolean,
   isWord: boolean,
+  /** Vertical-writing-mode span (90°/270° rotation) */
+  vertical = false,
+  /** Flip for 270° (text flows bottom-to-top) */
+  flip = false,
+  /** Tilt angle in degrees (display clockwise-positive) — the span
+   *  rotates with skewed text. */
+  tilt = 0,
 ): HTMLSpanElement {
   const span = document.createElement('span')
   span.className = 'ocr-span'
@@ -194,75 +236,118 @@ function createFittedSpan(
   span.style.width = `${Math.max(width, 1)}px`
   span.style.height = `${Math.max(height, 1)}px`
   span.style.fontSize = `${Math.max(fontSize, 6)}px`
-  span.style.lineHeight = `${Math.max(height, 1)}px`
+  if (!vertical) span.style.lineHeight = `${Math.max(height, 1)}px`
   span.style.position = 'absolute'
+  if (vertical) {
+    // Vertical flow: the word runs top-to-bottom (90°) / flipped for
+    // 270° — glyph orientation matches the page's rotation.
+    span.style.writingMode = 'vertical-rl'
+    if (flip) {
+      span.style.transform = 'rotate(180deg)'
+      span.style.transformOrigin = 'center'
+    }
+  }
   if (debug) {
-    span.style.color = 'rgba(255, 0, 0, 0.5)'
-    span.style.outline = '1px dashed rgba(255, 0, 0, 0.3)'
+    // Debug: the text stays transparent (it is rendered with a browser
+    // font fitted into the box, so it never matches the page's own
+    // glyphs — showing it invites false "misalignment" reports). The
+    // selection highlight still covers the fitted glyphs; the TRUE
+    // boundary is drawn on a separate non-transformed element below.
+    span.style.color = 'transparent'
   }
   container.appendChild(span)
 
+  // Fit the browser-font text to the box with letter-spacing, NOT
+  // scaleX: letter-spacing is part of layout, so the selection highlight
+  // covers the fitted text exactly. Chromium does not reflect CSS scale
+  // transforms in selection-highlight painting — stretched text left
+  // gaps between the highlight and the box (bold/large text where the
+  // browser font is narrower than the page font).
   const range = document.createRange()
   range.selectNodeContents(span)
-  const textWidth = range.getBoundingClientRect().width
-  if (textWidth > 0 && width > 0) {
-    if (textWidth > width) {
-      const scaleX = Math.min(Math.max(width / textWidth, 0.3), 3.0)
-      span.style.transform = `scaleX(${scaleX})`
+  const rect = range.getBoundingClientRect()
+  const natural = vertical ? rect.height : rect.width
+  const boxLen = vertical ? height : width
+  if (natural > 0 && boxLen > 0) {
+    if (text.length > 1) {
+      // n-1 gaps between n glyphs (the trailing space included)
+      const spacing = (boxLen - natural) / (text.length - 1)
+      span.style.letterSpacing = `${spacing}px`
     } else {
-      span.style.transform = `translateX(${(width - textWidth) / 2}px)`
+      // Single glyph: letter-spacing has no effect — fall back to a
+      // scale along the flow direction (highlight may lag here).
+      const k = Math.min(Math.max(boxLen / natural, 0.3), 3.0)
+      const scale = vertical ? `scaleY(${k})` : `scaleX(${k})`
+      span.style.transform = flip ? `rotate(180deg) ${scale}` : scale
     }
+  }
+
+  // Tilt with the text on skewed pages (rotates about the span center).
+  if (tilt && text.length > 1) {
+    span.style.transform = `rotate(${tilt}deg)`
+  }
+
+  if (debug) {
+    // True boundary outline on a separate, non-transformed element —
+    // an outline on the span itself would be stretched by the scaleX
+    // above and misrepresent the word boundary.
+    const box = document.createElement('div')
+    box.className = 'ocr-debug-box'
+    box.style.position = 'absolute'
+    box.style.left = `${left}px`
+    box.style.top = `${top}px`
+    box.style.width = `${Math.max(width, 1)}px`
+    box.style.height = `${Math.max(height, 1)}px`
+    box.style.outline = '1px dashed rgba(255, 0, 0, 0.45)'
+    box.style.pointerEvents = 'none'
+    if (tilt) box.style.transform = `rotate(${tilt}deg)`
+    container.appendChild(box)
   }
   return span
 }
 
+interface WordRect {
+  text: string
+  /** Word extent in PDF pt (y-range = the line's anchor band) */
+  rect: { x0: number; y0: number; x1: number; y1: number }
+}
+
 /**
- * Word-level rendering (preferred): each word gets its own span. Primary
- * placement comes from `word_bounds` — word gaps located in the DETECTION
- * mask's column profile (pixel evidence, no CTC timing involved). Lines
- * whose gap structure is ambiguous fall back to the CTC peak-midpoint
- * scheme (`chars`), which is immune to browser font-metric drift but
- * accumulates per-word error on variable-width glyphs.
+ * Split a box into per-word PDF-space rects. Returns null when the box
+ * lacks per-word data (tight box + char emissions) — the caller falls
+ * back to a whole-line span.
+ *
+ * Word x-extents come from `word_bounds` (pixel-gap evidence) when
+ * available; otherwise the CTC peak-midpoint scheme mapped through the
+ * calibrated anchor margins (mL=0.30em, mR=0.05em — the tight box is a
+ * shrunken view of the glyphs, the 0.3 contour starts late on thin
+ * strokes like "T"). Margins are relative to the em-equivalent
+ * inkH × 1.27, matching the rendered font size.
  */
-function renderWordSpans(
-  container: HTMLDivElement,
-  box: OcrBox,
-  viewport: PageViewport,
-  debug: boolean,
-): void {
-  const { height } = pdfRectToViewport(viewport, box)
-  const tight = pdfRectToViewport(viewport, {
-    x0: box.tx0!,
-    y0: box.ty0!,
-    x1: box.tx1!,
-    y1: box.ty1!,
-  })
-  const scalePxPerPt = height / Math.max(box.y1 - box.y0, 1e-6)
-  const tightH = box.ty1! - box.ty0!
-  const fontSize = tightH * 1.27 * scalePxPerPt
-
-  // The tight box (DB mask extent) is a *shrunken* view of the glyphs.
-  // Calibrated at 300 DPI with the peak-midpoint boundary scheme:
-  // the left edge needs a larger margin than the right (the 0.3 contour
-  // starts late on thin strokes like "T"). Sweep result: mL=0.30em,
-  // mR=0.05em → word boundary errors ≤ 10px (≈0.25 char).
-  const mL = fontSize * 0.3
-  const mR = fontSize * 0.05
-  const mY = fontSize * 0.1
-  const anchor = {
-    left: tight.left - mL,
-    top: tight.top - mY,
-    width: tight.width + mL + mR,
-    height: tight.height + 2 * mY,
-  }
-
+function extractWordRects(box: OcrBox): WordRect[] | null {
   const text = box.text
-  const chars = box.chars!
   const n = text.length
-  if (n === 0) return
+  if (n === 0) return null
+  const hasTight =
+    (box.tx0 ?? 0) < (box.tx1 ?? 0) && (box.ty0 ?? 0) < (box.ty1 ?? 0)
+  const hasChars = (box.chars?.length ?? 0) > 0 && box.chars!.length === n
+  if (!hasTight || !hasChars) return null
 
-  // Word boundaries from pixel evidence (v2 caches): gaps in the
-  // detection mask locate the words directly.
+  const tx0 = box.tx0!
+  const ty0 = box.ty0!
+  const tx1 = box.tx1!
+  const ty1 = box.ty1!
+  const tightW = tx1 - tx0
+  const inkH = box.line_h && box.line_h > 0 ? box.line_h : ty1 - ty0
+  const em = inkH * 1.27
+  const mL = em * 0.3
+  const mR = em * 0.05
+  const mY = em * 0.1
+  const rectY0 = ty0 - mY
+  const rectY1 = ty1 + mY
+
+  // Word boundaries from pixel evidence: gaps in the detection mask
+  // locate the words directly (v4 caches).
   const wb = box.word_bounds
   const hasWb =
     !!wb && wb.length === text.split(/\s+/).filter((s) => s.length > 0).length
@@ -270,6 +355,7 @@ function renderWordSpans(
   // Character boundaries = midpoints between adjacent emission PEAKS.
   // Averaging adjacent noisy estimates is statistically the most stable
   // boundary available (vs raw first-emission edges used previously).
+  const chars = box.chars!
   const boundaries: number[] = new Array(n + 1)
   if (n === 1) {
     boundaries[0] = chars[0] - 0.5
@@ -283,8 +369,11 @@ function renderWordSpans(
   }
   const b0 = boundaries[0]
   const bSpan = Math.max(boundaries[n] - b0, 1e-6)
-  const xAt = (f: number) => anchor.left + ((f - b0) / bSpan) * anchor.width
+  const anchorL = tx0 - mL
+  const anchorW = tightW + mL + mR
+  const xAt = (f: number) => anchorL + ((f - b0) / bSpan) * anchorW
 
+  const words: WordRect[] = []
   let i = 0
   let w = 0
   while (i < n) {
@@ -295,30 +384,116 @@ function renderWordSpans(
     while (j + 1 < n && !/\s/.test(text[j + 1])) j++
     // Trailing space joins the word so cross-word selection keeps spaces
     const wordText = text.slice(i, j + 1) + (j + 1 < n ? ' ' : '')
-    const wordLeft = hasWb
-      ? tight.left + wb![w][0] * tight.width
-      : xAt(boundaries[i])
-    const wordRight = hasWb
-      ? tight.left + wb![w][1] * tight.width
-      : xAt(boundaries[j + 1])
-    // Expand the hit region generously (CTC boundary noise is ±0.25em);
-    // the rendered glyphs stay centered inside, so expanded margins only
-    // make clicking more forgiving. Adjacent spans overlap in the margins,
-    // and getWordAtPosition picks the nearest-center word on a hit.
-    const pad = fontSize * 0.25
-    createFittedSpan(
-      container,
-      wordText,
-      wordLeft - pad,
-      anchor.top,
-      wordRight - wordLeft + 2 * pad,
-      anchor.height,
-      fontSize,
-      debug,
-      true,
-    )
+    const x0 = hasWb ? tx0 + wb![w][0] * tightW : xAt(boundaries[i])
+    const x1 = hasWb ? tx0 + wb![w][1] * tightW : xAt(boundaries[j + 1])
+    words.push({ text: wordText, rect: { x0, y0: rectY0, x1, y1: rectY1 } })
     i = j + 1
     w++
+  }
+  return words
+}
+
+/**
+ * Word-level rendering (preferred): each word gets its own span placed
+ * by `extractWordRects` (pixel-gap evidence, CTC midpoints as fallback).
+ */
+function renderWordSpans(
+  container: HTMLDivElement,
+  box: OcrBox,
+  viewport: PageViewport,
+  debug: boolean,
+): void {
+  const words = extractWordRects(box)
+  if (!words) {
+    renderLineSpan(container, box, viewport, debug)
+    return
+  }
+  const { height } = pdfRectToViewport(viewport, box)
+  const scalePxPerPt = height / Math.max(box.y1 - box.y0, 1e-6)
+  const inkH = box.line_h && box.line_h > 0 ? box.line_h : box.ty1! - box.ty0!
+  const fontSize = inkH * 1.27 * scalePxPerPt
+  // Expand the hit region generously (CTC boundary noise is ±0.25em).
+  // In debug mode the outline shows the TRUE pixel-gap span instead.
+  const pad = debug ? 0 : fontSize * 0.25
+  const tilt = box.angle ?? 0
+  for (const w of words) {
+    const r = pdfRectToViewport(viewport, w.rect)
+    if (Math.abs(tilt) < 0.05) {
+      createFittedSpan(
+        container,
+        w.text,
+        r.left - pad,
+        r.top,
+        r.width + 2 * pad,
+        r.height,
+        fontSize,
+        debug,
+        true,
+      )
+    } else {
+      // Tilted line: the tight box is the drift band whose mid-y sits on
+      // the line at every x. Center a word-height box at the word's
+      // axis-aligned center and rotate it with the line so the span hugs
+      // the tilted glyphs.
+      const cx = r.left + r.width / 2
+      const cy = r.top + r.height / 2
+      const wd = r.width + 2 * pad
+      const h = fontSize * 1.2
+      createFittedSpan(
+        container,
+        w.text,
+        cx - wd / 2,
+        cy - h / 2,
+        wd,
+        h,
+        fontSize,
+        debug,
+        true,
+        false,
+        false,
+        tilt,
+      )
+    }
+  }
+}
+
+/**
+ * 90°/270° rotation: render words as vertical-writing-mode spans laid
+ * out DIRECTLY in rotated space (no container rotation). The browser's
+ * native vertical-text selection maps drags and ranges exactly, whereas
+ * selecting inside a CSS-rotated container loses characters between the
+ * highlight and the copied text.
+ */
+function renderVerticalLine(
+  container: HTMLDivElement,
+  box: OcrBox,
+  viewportRot: PageViewport,
+  debug: boolean,
+  rot: number,
+): void {
+  const words = extractWordRects(box)
+  const items: WordRect[] = words
+    ? words
+    : [{ text: box.text, rect: { x0: box.x0, y0: box.y0, x1: box.x1, y1: box.y1 } }]
+  const inkH = box.line_h && box.line_h > 0 ? box.line_h : box.ty1! - box.ty0!
+  const fontSize = Math.max(inkH * 1.27 * viewportRot.scale, 6)
+  const pad = debug ? 0 : fontSize * 0.25
+
+  for (const w of items) {
+    const r = pdfRectToViewport(viewportRot, w.rect)
+    createFittedSpan(
+      container,
+      w.text,
+      r.left,
+      r.top - pad,
+      r.width,
+      r.height + 2 * pad,
+      fontSize,
+      debug,
+      !!words,
+      true, // vertical
+      rot === 270, // flip for 270°
+    )
   }
 }
 

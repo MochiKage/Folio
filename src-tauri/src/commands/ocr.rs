@@ -153,6 +153,7 @@ fn run_ocr_blocking(
             let tx1 = view_box[0] + b.tx1 * (view_box[2] - view_box[0]) / img_w as f32;
             let ty_top = view_box[3] - b.ty0 * (view_box[3] - view_box[1]) / img_h as f32;
             let ty_bottom = view_box[3] - b.ty1 * (view_box[3] - view_box[1]) / img_h as f32;
+            let line_h = b.line_h * (view_box[3] - view_box[1]) / img_h as f32;
             OcrBox {
                 text: b.text.clone(),
                 x0,
@@ -166,6 +167,8 @@ fn run_ocr_blocking(
                 ty1: ty_top,
                 chars: b.chars.clone(),
                 word_bounds: b.word_bounds.clone(),
+                line_h,
+                angle: b.angle,
                 v: b.v,
             }
         })

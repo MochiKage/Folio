@@ -21,6 +21,10 @@ fn main() {
     let t = std::time::Instant::now();
     let (boxes, (w, h)) = engine.recognize(&png).expect("recognize failed");
     println!("image {}x{} — {} boxes in {:?}", w, h, boxes.len(), t.elapsed());
+    println!(
+        "  page tilt {:.2}°",
+        boxes.first().map(|b| b.angle).unwrap_or(0.0)
+    );
     for b in &boxes {
         println!(
             "  [{:>5.0},{:>5.0} {:>5.0},{:>5.0}] tight [{:>5.0},{:>5.0} {:>5.0},{:>5.0}] wb={} {:.3}  {}",
