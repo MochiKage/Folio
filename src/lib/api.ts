@@ -243,11 +243,30 @@ export function renameDictionary(
 // ─── OCR ───────────────────────────────────────────
 export interface OcrBox {
   text: string
+  /** Padded box (PDF space) — used for recognition cropping */
   x0: number
   y0: number
   x1: number
   y1: number
   confidence: number
+  /** Tight bounding box of the detected text pixels (PDF space, y-up).
+   *  Used to position the rendered text layer precisely on the page.
+   *  Absent (0) for older cached results — fall back to x0..y1. */
+  tx0?: number
+  ty0?: number
+  tx1?: number
+  ty1?: number
+  /** Per-character CTC emission fractions (0..1, aligned with `text`).
+   *  Char k of `text` reached its probability peak at timestep chars[k]×T.
+   *  Used for word-level span positioning — absent in older cached results. */
+  chars?: number[]
+  /** Per-word horizontal spans as fractions (0..1) of the tight box width,
+   *  aligned with the whitespace-separated words of `text`. Extracted from
+   *  the source image's column profile — pixel evidence, preferred over
+   *  `chars` (CTC timing) for word placement. Empty when gaps are ambiguous. */
+  word_bounds?: [number, number][]
+  /** Cache format version — entries with v < 2 predate image-derived word_bounds. */
+  v?: number
 }
 
 export interface OcrPageData {

@@ -38,14 +38,20 @@ pnpm tauri dev
 - 侧边栏：可拖拽调整宽度、窄模式图标化、点击标签自动开关
 - 数据库：SQLite 存储文档/标注/书签/单词/标签（Rust rusqlite + Tauri commands）
 - 快捷键：Ctrl+O 打开、Ctrl+B 侧栏、F11 全屏、Esc 退出全屏
+- 离线词典：ECDICT 英汉词典 + 多词典管理（导入/验证/优先级/启用禁用）+ 词形还原查词
+- OCR 文本识别：PaddleOCR PP-OCRv4（ONNX Runtime，Rust 侧推理）
+  - 扫描版 PDF 自动触发识别，结果渲染为可选中文本层（查词/高亮/复制全兼容）
+  - 逐页结果持久化到 `ocr_cache`（重启后秒开）
+  - OCR 按钮可强制重新识别 + 失败重试
+  - 模型安装：`powershell -ExecutionPolicy Bypass -File src-tauri/resources/models/download.ps1`
 
 ## 计划中
 
-- OCR 文本识别（PaddleOCR ONNX）
 - TTS 语音朗读（Kokoro-82M）
-- 划词翻译 + 离线词典（ECDICT）
+- 划词翻译（句子级）
 - 自动元数据提取（DOI Crossref）
 - 标注导出 + 云同步
+- PDF 全文搜索（FTS5 表已就绪）
 - Android 版（Tauri mobile）
 
 ## 项目结构

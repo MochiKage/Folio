@@ -1,7 +1,9 @@
 mod commands;
 mod db;
 mod dictionary;
+pub mod ocr_engine;
 
+use std::sync::Arc;
 use db::Database;
 use dictionary::{DictionaryManager, DictionaryMeta};
 use tauri::Manager;
@@ -127,6 +129,31 @@ pub fn run() {
                     ),
                 }
             }
+
+            // ── OCR Engine state ────────────────
+            // Models live in resources/models (dev: CARGO_MANIFEST_DIR,
+            // prod: bundled resource dir). Engine loads lazily on first
+            // OCR run; onnxruntime.dll is loaded from resources/lib.
+            let manifest_models = manifest_dir.join("resources").join("models");
+            let models_dir = if manifest_models.exists() {
+                manifest_models
+            } else {
+                resource_dir.join("resources").join("models")
+            };
+            let dll_path = models_dir
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join("lib")
+                .join("onnxruntime.dll");
+            log::info!(
+                "OCR models dir: {:?} (dll: {:?})",
+                models_dir,
+                dll_path
+            );
+            app.manage(Arc::new(commands::ocr::OcrState::new(
+                models_dir,
+                dll_path,
+            )));
 
             app.manage(database);
             app.manage(manager);

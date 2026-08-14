@@ -74,6 +74,66 @@ export function getWordAtSelection(): string {
 }
 
 /**
+ * Get the exact word at a client-space point using the browser's caret
+ * hit-testing (caretPositionFromPoint) and word-boundary expansion.
+ *
+ * Unlike span-level hit-testing, this returns the *word* under the cursor
+ * even when one span contains a whole text line — which is how OCR text
+ * layers are rendered (one `.ocr-span` per recognized box).
+ *
+ * Temporarily moves the DOM selection; the previous selection is saved and
+ * restored before returning, so callers can still read it afterwards.
+ */
+export function getWordAtCaretPoint(x: number, y: number): string | null {
+  const sel = window.getSelection()
+  if (!sel) return null
+
+  // Save the current selection (cloned ranges survive removeAllRanges)
+  const saved: Range[] = []
+  for (let i = 0; i < sel.rangeCount; i++) {
+    saved.push(sel.getRangeAt(i).cloneRange())
+  }
+
+  try {
+    let range: Range | null = null
+    if (document.caretPositionFromPoint) {
+      const pos = document.caretPositionFromPoint(x, y)
+      if (pos) {
+        range = document.createRange()
+        range.setStart(pos.offsetNode, pos.offset)
+        range.collapse(true)
+      }
+    } else {
+      // Safari/old-WebKit fallback
+      const doc = document as Document & {
+        caretRangeFromPoint?: (x: number, y: number) => Range | null
+      }
+      range = doc.caretRangeFromPoint?.(x, y) ?? null
+    }
+    if (!range) return null
+
+    sel.removeAllRanges()
+    sel.addRange(range)
+    // Select the enclosing word: move the caret to the word start, then
+    // extend forward to its end ([click] → [wordStart] → [wordStart, wordEnd]).
+    // Note: extend-backward + extend-forward does NOT work — after the
+    // backward extend the focus sits at the word start and a forward extend
+    // only returns it to the click position.
+    sel.modify('move', 'backward', 'word')
+    sel.modify('extend', 'forward', 'word')
+    return sel.toString().trim() || null
+  } catch {
+    return null
+  } finally {
+    // Restore the user's selection
+    sel.removeAllRanges()
+    for (const r of saved) {
+      sel.addRange(r)
+    }
+  }
+}
+
+/**
  * Merge multiple PDF-space rectangles into a single bounding box.
  */
 export function mergeRects(

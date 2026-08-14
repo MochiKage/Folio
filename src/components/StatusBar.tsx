@@ -28,6 +28,7 @@ export default function StatusBar() {
   )
   const forceOcr = useOcrStore((s) => s.forceOcr)
   const toggleForceOcr = useOcrStore((s) => s.toggleForceOcr)
+  const setPageStatus = useOcrStore((s) => s.setPageStatus)
   const pageOcrStatus = useOcrStore((s) => {
     if (!activeDoc) return 'idle'
     return s.statuses[`${activeDoc.id}:${activePage}`] ?? 'idle'
@@ -67,13 +68,20 @@ export default function StatusBar() {
         {/* Force OCR toggle */}
         {activeDoc && (
           <button
-            onClick={toggleForceOcr}
+            onClick={() => {
+              toggleForceOcr()
+              // Retry a failed page OCR on click (e.g. after installing
+              // the models with resources/models/download.ps1)
+              if (activeDoc && pageOcrStatus === 'error') {
+                setPageStatus(activeDoc.id, activePage, 'idle')
+              }
+            }}
             className={`rounded px-1.5 py-0.5 text-[10px] transition-colors ${
               forceOcr
                 ? 'bg-[var(--color-accent)]/10 font-medium text-[var(--color-accent)]'
                 : 'hover:bg-[var(--border)]/30 hover:text-[var(--text)]/70 text-[var(--text)]/30'
             }`}
-            title="Toggle OCR mode — use PDF text coordinates to render selectable text layer"
+            title="Force OCR mode — run PaddleOCR on this page even if it has embedded text (scanned pages are OCR'd automatically)"
           >
             OCR
           </button>

@@ -1,13 +1,14 @@
 import { useRef, useEffect, useCallback, memo } from 'react'
 import type { PDFPageProxy, PageViewport } from 'pdfjs-dist'
 import { pdfjsLib } from '../lib/pdfjs'
-import { renderOcrTextLayer } from '../lib/ocr'
-import { mergeParagraphLines } from '../lib/textLayer'
-import { useOcrStore } from '../stores/ocrStore'
+import { renderOcrTextLayer, renderPageForOcr, OCR_DPI } from '../lib/ocr'
+import { mergeParagraphLines, hasEmbeddedText } from '../lib/textLayer'
+import { useOcrStore, enqueueOcrJob } from '../stores/ocrStore'
 import { useContextMenuStore } from '../stores/contextMenuStore'
 import { useAnnotationStore } from '../stores/annotationStore'
-import { selectionToPdfRects, mergeRects, rectsOverlap } from '../lib/selection'
+import { selectionToPdfRects, mergeRects, rectsOverlap, getWordAtCaretPoint } from '../lib/selection'
 import AnnotationOverlay from './AnnotationOverlay'
+import * as api from '../lib/api'
 import type { Annotation } from '../lib/api'
 
 /** Stable empty array to avoid re-renders from `?? []` (same pattern as AnnotationOverlay) */
@@ -42,6 +43,11 @@ const PdfPage = memo(function PdfPage({
   const cachedBoxes = useOcrStore(
     (s) => (documentId ? s.boxes[`${documentId}:${pageNumber}`] : undefined) ?? null,
   )
+  const pageStatus = useOcrStore(
+    (s) => (documentId ? s.statuses[`${documentId}:${pageNumber}`] : undefined) ?? 'idle',
+  )
+  const setPageStatus = useOcrStore((s) => s.setPageStatus)
+  const setPageResult = useOcrStore((s) => s.setPageResult)
 
   const showContextMenu = useContextMenuStore((s) => s.show)
   const pageAnnotations = useAnnotationStore(
@@ -49,21 +55,30 @@ const PdfPage = memo(function PdfPage({
   )
 
   /**
-   * Find the full text of the span at a given position in the text layer.
+   * Find the word at a given position in the text layer.
    *
-   * PDF.js text-layer spans are absolutely positioned with inline `left`
-   * and `top` styles in page-local coordinates.  Their `textContent` always
-   * carries the complete text of that run regardless of browser font-rendering
-   * quirks — so using it for word lookup is more reliable than relying on the
-   * DOM selection (which can miss edge characters when the glyph extends past
-   * the font-metric advance width).
+   * Two layers of hit-testing:
+   * 1. PDF.js native spans are small text fragments (usually a single word),
+   *    so the span's `textContent` IS the word.  Using it directly is more
+   *    reliable than caret hit-testing — it survives the glyph-overhang
+   *    problem (the original "astrophysics → astrophysic" bug), hence the
+   *    +5px right tolerance.
+   * 2. OCR spans contain a WHOLE LINE of text per span, so the span text
+   *    must not be returned as-is (it would always resolve to the first
+   *    word).  Instead use caret-based word extraction at the click point.
    *
-   * Returns the span's textContent if a span is found near (vx, vy), or null.
+   * Returns the word at (vx, vy) in page-local coordinates, or null.
    */
   const getWordAtPosition = useCallback(
     (vx: number, vy: number): string | null => {
       const div = textLayerRef.current
       if (!div) return null
+
+      // Word-level OCR spans have generous overlapping hit regions —
+      // collect every span under the point and prefer the one whose
+      // center is nearest to the click.
+      let bestText: string | null = null
+      let bestDist = Infinity
 
       const spans = div.querySelectorAll('span')
       for (const span of spans) {
@@ -81,10 +96,27 @@ const PdfPage = memo(function PdfPage({
           vy >= top - 1 &&
           vy <= top + rect.height + 1
         ) {
-          return (el.textContent || '').trim()
+          const text = (el.textContent || '').trim()
+          if (!el.classList.contains('ocr-span') || el.dataset.word === '1') {
+            // Native fragment spans are precise — return immediately.
+            // OCR word spans compete by center distance.
+            if (el.dataset.word !== '1') return text
+            const center = left + rect.width / 2
+            const dist = Math.abs(vx - center)
+            if (dist < bestDist) {
+              bestDist = dist
+              bestText = text
+            }
+          } else {
+            // OCR line-span fallback: caret hit-testing
+            const divRect = div.getBoundingClientRect()
+            const caretWord =
+              getWordAtCaretPoint(divRect.left + vx, divRect.top + vy) ?? text
+            return caretWord
+          }
         }
       }
-      return null
+      return bestText
     },
     [],
   )
@@ -191,6 +223,54 @@ const PdfPage = memo(function PdfPage({
     [pageNumber, showContextMenu, findOverlappingHighlights],
   )
 
+  /**
+   * Run OCR on this page: DB cache hit → reuse; otherwise render the page
+   * to a 300-DPI PNG and run PaddleOCR in the Rust backend.
+   *
+   * enqueueOcrJob serializes jobs globally and dedups in-flight requests
+   * (StrictMode double-effects / zoom changes during a run are safe).
+   * On success setPageResult updates the store, which flips `cachedBoxes`
+   * and re-runs renderPage → renderOcrTextLayer.
+   */
+  const runOcrForPage = useCallback(async () => {
+    if (!documentId) return
+    try {
+      const boxes = await enqueueOcrJob(documentId, pageNumber, async () => {
+        setPageStatus(documentId, pageNumber, 'loading')
+        const cached = await api.getOcrResult(documentId, pageNumber)
+        // Reject stale-format cache entries (v < 2 predates the
+        // image-derived word_bounds) — they render misaligned; re-OCR
+        // regenerates them.
+        if (
+          cached &&
+          cached.boxes.length > 0 &&
+          cached.boxes.every(
+            (b) =>
+              (b.v ?? 0) >= 2 &&
+              (b.tx1 ?? 0) > (b.tx0 ?? 0) &&
+              (b.chars?.length ?? 0) > 0,
+          )
+        ) {
+          return cached.boxes
+        }
+        const { bytes, height, viewBox } = await renderPageForOcr(page)
+        const res = await api.runOcr(
+          documentId,
+          pageNumber,
+          Array.from(bytes),
+          OCR_DPI,
+          height,
+          viewBox,
+        )
+        return res.boxes
+      })
+      setPageResult(documentId, pageNumber, boxes)
+    } catch (err) {
+      console.error('[PdfPage] OCR failed:', err)
+      setPageStatus(documentId, pageNumber, 'error')
+    }
+  }, [documentId, pageNumber, page, setPageStatus, setPageResult])
+
   const renderPage = useCallback(async () => {
     const canvas = canvasRef.current
     const textLayerDiv = textLayerRef.current
@@ -253,14 +333,20 @@ const PdfPage = memo(function PdfPage({
       const hasCached = cachedBoxes !== null && cachedBoxes.length > 0
 
       if (hasCached) {
-        // Real OCR cache hit (Phase 3): render from stored bounding boxes
+        // OCR result (from store): render selectable spans from the
+        // stored PDF-space bounding boxes.
         renderOcrTextLayer(textLayerDiv, cachedBoxes!, viewport)
       } else {
-        // PDF.js TextLayer — works for both normal and forceOcr modes.
-        // In forceOcr mode this uses the same text content; in Phase 3
-        // real OCR boxes will use renderOcrTextLayer above.
         const textContent = await textContentPromise
         if (genRef.current !== gen) return
+
+        // Scanned page (no embedded text) or force-OCR mode → PaddleOCR.
+        // The text layer stays empty until the job completes; the store
+        // update re-runs renderPage and takes the hasCached branch above.
+        if (!hasEmbeddedText(textContent) || forceOcr) {
+          if (pageStatus === 'idle') void runOcrForPage()
+          return
+        }
 
         const textLayer = new TextLayer({
           textContentSource: textContent,
@@ -285,7 +371,7 @@ const PdfPage = memo(function PdfPage({
         console.error('[PdfPage] render failed:', e)
       }
     }
-  }, [page, zoom, rotation, forceOcr, cachedBoxes])
+  }, [page, zoom, rotation, forceOcr, cachedBoxes, pageStatus, documentId, runOcrForPage])
 
   useEffect(() => {
     renderPage()

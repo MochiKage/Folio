@@ -19,7 +19,7 @@ function multiplyTransform(m1: number[], m2: number[]): number[] {
 
 export function pdfRectToViewport(
   viewport: PageViewport,
-  box: OcrBox,
+  box: { x0: number; y0: number; x1: number; y1: number },
 ): { left: number; top: number; width: number; height: number } {
   const [blX, blY] = viewport.convertToViewportPoint(box.x0, box.y0)
   const [trX, trY] = viewport.convertToViewportPoint(box.x1, box.y1)
@@ -156,22 +156,185 @@ export function renderOcrTextLayer(
   }
 
   for (const box of boxes) {
-    const { left, top, width, height } = pdfRectToViewport(viewport, box)
-    const span = document.createElement('span')
-    span.className = 'ocr-span'
-    span.textContent = box.text
-    span.style.left = `${left}px`
-    span.style.top = `${top}px`
-    span.style.width = `${Math.max(width, 1)}px`
-    span.style.height = `${Math.max(height, 1)}px`
-    span.style.fontSize = `${Math.max(height * 0.85, 6)}px`
-    span.style.position = 'absolute'
-    if (debug) {
-      span.style.color = 'rgba(255, 0, 0, 0.5)'
-      span.style.outline = '1px dashed rgba(255, 0, 0, 0.3)'
+    const hasTight =
+      (box.tx0 ?? 0) < (box.tx1 ?? 0) && (box.ty0 ?? 0) < (box.ty1 ?? 0)
+    const hasChars = (box.chars?.length ?? 0) > 0 && box.chars!.length === box.text.length
+    if (hasTight && hasChars) {
+      renderWordSpans(container, box, viewport, debug)
+    } else {
+      renderLineSpan(container, box, viewport, debug)
     }
-    container.appendChild(span)
   }
+}
+
+// ─── OCR text layer rendering ────────────────────
+
+/**
+ * Create an ocr-span for a piece of text inside a box region, fitting the
+ * rendered glyphs to the region (scaleX when overflowing, centering when
+ * narrower — the region margins are symmetric around the image glyphs).
+ */
+function createFittedSpan(
+  container: HTMLDivElement,
+  text: string,
+  left: number,
+  top: number,
+  width: number,
+  height: number,
+  fontSize: number,
+  debug: boolean,
+  isWord: boolean,
+): HTMLSpanElement {
+  const span = document.createElement('span')
+  span.className = 'ocr-span'
+  if (isWord) span.dataset.word = '1'
+  span.textContent = text
+  span.style.left = `${left}px`
+  span.style.top = `${top}px`
+  span.style.width = `${Math.max(width, 1)}px`
+  span.style.height = `${Math.max(height, 1)}px`
+  span.style.fontSize = `${Math.max(fontSize, 6)}px`
+  span.style.lineHeight = `${Math.max(height, 1)}px`
+  span.style.position = 'absolute'
+  if (debug) {
+    span.style.color = 'rgba(255, 0, 0, 0.5)'
+    span.style.outline = '1px dashed rgba(255, 0, 0, 0.3)'
+  }
+  container.appendChild(span)
+
+  const range = document.createRange()
+  range.selectNodeContents(span)
+  const textWidth = range.getBoundingClientRect().width
+  if (textWidth > 0 && width > 0) {
+    if (textWidth > width) {
+      const scaleX = Math.min(Math.max(width / textWidth, 0.3), 3.0)
+      span.style.transform = `scaleX(${scaleX})`
+    } else {
+      span.style.transform = `translateX(${(width - textWidth) / 2}px)`
+    }
+  }
+  return span
+}
+
+/**
+ * Word-level rendering (preferred): each word gets its own span. Primary
+ * placement comes from `word_bounds` — word gaps located in the DETECTION
+ * mask's column profile (pixel evidence, no CTC timing involved). Lines
+ * whose gap structure is ambiguous fall back to the CTC peak-midpoint
+ * scheme (`chars`), which is immune to browser font-metric drift but
+ * accumulates per-word error on variable-width glyphs.
+ */
+function renderWordSpans(
+  container: HTMLDivElement,
+  box: OcrBox,
+  viewport: PageViewport,
+  debug: boolean,
+): void {
+  const { height } = pdfRectToViewport(viewport, box)
+  const tight = pdfRectToViewport(viewport, {
+    x0: box.tx0!,
+    y0: box.ty0!,
+    x1: box.tx1!,
+    y1: box.ty1!,
+  })
+  const scalePxPerPt = height / Math.max(box.y1 - box.y0, 1e-6)
+  const tightH = box.ty1! - box.ty0!
+  const fontSize = tightH * 1.27 * scalePxPerPt
+
+  // The tight box (DB mask extent) is a *shrunken* view of the glyphs.
+  // Calibrated at 300 DPI with the peak-midpoint boundary scheme:
+  // the left edge needs a larger margin than the right (the 0.3 contour
+  // starts late on thin strokes like "T"). Sweep result: mL=0.30em,
+  // mR=0.05em → word boundary errors ≤ 10px (≈0.25 char).
+  const mL = fontSize * 0.3
+  const mR = fontSize * 0.05
+  const mY = fontSize * 0.1
+  const anchor = {
+    left: tight.left - mL,
+    top: tight.top - mY,
+    width: tight.width + mL + mR,
+    height: tight.height + 2 * mY,
+  }
+
+  const text = box.text
+  const chars = box.chars!
+  const n = text.length
+  if (n === 0) return
+
+  // Word boundaries from pixel evidence (v2 caches): gaps in the
+  // detection mask locate the words directly.
+  const wb = box.word_bounds
+  const hasWb =
+    !!wb && wb.length === text.split(/\s+/).filter((s) => s.length > 0).length
+
+  // Character boundaries = midpoints between adjacent emission PEAKS.
+  // Averaging adjacent noisy estimates is statistically the most stable
+  // boundary available (vs raw first-emission edges used previously).
+  const boundaries: number[] = new Array(n + 1)
+  if (n === 1) {
+    boundaries[0] = chars[0] - 0.5
+    boundaries[1] = chars[0] + 0.5
+  } else {
+    boundaries[0] = chars[0] - (chars[1] - chars[0]) / 2
+    for (let k = 1; k < n; k++) {
+      boundaries[k] = (chars[k - 1] + chars[k]) / 2
+    }
+    boundaries[n] = chars[n - 1] + (chars[n - 1] - chars[n - 2]) / 2
+  }
+  const b0 = boundaries[0]
+  const bSpan = Math.max(boundaries[n] - b0, 1e-6)
+  const xAt = (f: number) => anchor.left + ((f - b0) / bSpan) * anchor.width
+
+  let i = 0
+  let w = 0
+  while (i < n) {
+    // skip whitespace between words
+    while (i < n && /\s/.test(text[i])) i++
+    if (i >= n) break
+    let j = i
+    while (j + 1 < n && !/\s/.test(text[j + 1])) j++
+    // Trailing space joins the word so cross-word selection keeps spaces
+    const wordText = text.slice(i, j + 1) + (j + 1 < n ? ' ' : '')
+    const wordLeft = hasWb
+      ? tight.left + wb![w][0] * tight.width
+      : xAt(boundaries[i])
+    const wordRight = hasWb
+      ? tight.left + wb![w][1] * tight.width
+      : xAt(boundaries[j + 1])
+    // Expand the hit region generously (CTC boundary noise is ±0.25em);
+    // the rendered glyphs stay centered inside, so expanded margins only
+    // make clicking more forgiving. Adjacent spans overlap in the margins,
+    // and getWordAtPosition picks the nearest-center word on a hit.
+    const pad = fontSize * 0.25
+    createFittedSpan(
+      container,
+      wordText,
+      wordLeft - pad,
+      anchor.top,
+      wordRight - wordLeft + 2 * pad,
+      anchor.height,
+      fontSize,
+      debug,
+      true,
+    )
+    i = j + 1
+    w++
+  }
+}
+
+/**
+ * Line-level fallback (stale caches without per-char emission data):
+ * render the whole line in one span, centered in the padded box.
+ */
+function renderLineSpan(
+  container: HTMLDivElement,
+  box: OcrBox,
+  viewport: PageViewport,
+  debug: boolean,
+): void {
+  const { left, top, width, height } = pdfRectToViewport(viewport, box)
+  const fontSize = height * 0.85
+  createFittedSpan(container, box.text, left, top, width, height, fontSize, debug, false)
 }
 
 // ─── OCR page rendering (Phase 3) ───

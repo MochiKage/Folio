@@ -8,8 +8,8 @@ function pageKey(docId: string, page: number): string {
 }
 
 interface OcrState {
-  /** User-forced OCR mode — override embedded text layer.
-   *  Currently uses debug/synthetic rendering until Phase 3 (PaddleOCR). */
+  /** User-forced OCR mode — run PaddleOCR even on pages with embedded
+   *  text (scanned pages are OCR'd automatically). */
   forceOcr: boolean
   /** Per-page OCR statuses, keyed by "docId:pageNum" */
   statuses: Record<string, OcrStatus>

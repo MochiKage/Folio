@@ -7,6 +7,8 @@ license = ""
 repository = ""
 edition = "2021"
 rust-version = "1.77.2"
+# `cargo run` must know which binary to use (ocr_smoke is a dev-only tool)
+default-run = "folio"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -26,3 +28,8 @@ tauri-plugin-log = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 rusqlite = { version = "0.34", features = ["bundled"] }
+# OCR: ONNX Runtime (load-dynamic — DLL loaded from resources/lib at startup).
+# Pinned: rc.x versions are not semver-compatible with each other.
+# rc.13 needs ORT >= 1.17 — we ship 1.23.2 (see resources/models/download.ps1).
+ort = { version = "=2.0.0-rc.13", features = ["load-dynamic"] }
+image = { version = "0.25", default-features = false, features = ["png"] }

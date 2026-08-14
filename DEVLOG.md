@@ -287,6 +287,107 @@ resources/stardict.db  →  resources/ecdict.db  →  D:\Downloads\stardict.db
 | `src/components/TitleBar.tsx` | 修改 | 新增 Dictionary (🌐) 标签按钮 |
 | `src-tauri/resources/ecdict.db` | **新增** | 开发用内置词典（21,506 词条，6.4 MB） |
 
+### 2026-08-13：OCR 文本识别 — PaddleOCR PP-OCRv4 完整落地
+
+**背景**：扫描版 PDF 无文本层，无法选词/查词/高亮。此前 OCR 管线仅有前端脚手架
+（300 DPI 渲染、作业队列、`ocr_cache` 表），Rust 端 `run_ocr` 是桩函数。
+
+**技术选型**：
+
+| 组件 | 选择 | 说明 |
+|------|------|------|
+| 推理引擎 | ONNX Runtime 1.27.1（`ort` crate 2.0.0-rc.13，load-dynamic） | DLL 由 NuGet 包 `Microsoft.ML.OnnxRuntime` 提供（国内可达）；rc.13 要求 ORT ≥ 1.27，GitHub 直连不可达时 NuGet 是可靠源 |
+| 检测模型 | `ch_PP-OCRv4_det_infer.onnx`（4.7MB，DB 算法） | 来自 RapidOCR 3.4.5 wheel（清华 PyPI 镜像），与预处理/后处理参数完全配套 |
+| 识别模型 | `ch_PP-OCRv4_rec_infer.onnx`（10.9MB，SVTR + CTC） | 同上；输出 6625 类 = blank@0 + 6623 字符 + 空格@6624 |
+| 预处理/后处理 | 参照 RapidOCR 参考实现逐参数移植 | det: limit_side_len=960(max)、thresh=0.3、box_thresh=0.5、unclip_ratio=1.6、膨胀+fast 评分；rec: [3,48,320] 动态宽、mean=std=0.5 |
+
+**关键坑位（踩坑记录）**：
+
+1. **`ort` 2.0.0-rc.13 与 DLL 版本匹配**：rc.x 之间不兼容（rc.13 要求 ORT ≥ 1.27）。
+   `Cargo.toml` 必须用 `=2.0.0-rc.13` 精确锁定（caret 会漂移到更新的 rc）。
+2. **CHW vs HWC 布局**：det 输入的 buffer 必须按 `buf[c*H*W + y*W + x]` 平面存放，
+   与 ONNX NCHW 输入一致。按像素交错存放（HWC）时模型不会报错，但输出概率图
+   位置错乱、识别结果全乱码。
+3. **rec 输入宽度必须是 8 的倍数**：SVTR 输出 T = ceil(W/8) 个时间步。
+   批量宽度 `img_w = max(320, 48*max_ratio)` 若不取整到 8 的倍数，CTC logits
+   行切片错位（每行 6625 个浮点），解码全乱码且置信度虚高（0.77-0.95）。
+   修复：`img_w = (img_w_raw + 7) / 8 * 8`，并在解码前校验 logits 长度。
+4. **det 输出分辨率**：实测 640×640 → 640×640 全分辨率输出（非 1/4 下采样），
+   后处理直接以输入尺寸为基准换算原始图像坐标。
+5. **`image` crate 的 `FilterType` 在 `imageops` 模块下**（0.25 版 API 变更）。
+6. **usize 下溢**：`(x > 0).then_some((x - 1, y))` 中 `then_some` 急需求值，
+   x=0 时 panic。用 `x.checked_sub(1)` 替代。
+
+**架构**：
+
+- `ocr_engine.rs`（新，~1100 行）：`OcrEngine::recognize(png) -> (boxes, dims)`
+  - det：resize(960-max, 32 倍) → 归一化 → DB 推理 → 二值化+膨胀 → 连通域 →
+    PCA 最小外接矩形 → 快速评分 → unclip 扩展 → 映射回原图坐标 → 阅读顺序排序
+  - rec：旋转裁剪（角点锚定双线性采样，竖排自动 rot90）→ 48 高按比例缩放 →
+    批量推理（≤6/批）→ 贪心 CTC 解码
+  - Session 用 Mutex 包裹（ort rc.13 的 `run` 需要 `&mut self`）
+- `commands/ocr.rs`：`run_ocr` 在 `spawn_blocking` 中执行（避免阻塞 UI 线程），
+  像素坐标 → PDF 坐标换算（viewBox 比例映射），结果 upsert 进 `ocr_cache`；
+  `OcrState` 懒加载引擎 + 失败重试（模型文件后装可恢复）
+- 前端接线：`PdfPage` 检测无文本层页面（`hasEmbeddedText` < 8 字符）自动触发
+  OCR → `renderOcrTextLayer` 渲染为可选中文本层 → 右键查词/高亮/复制全兼容；
+  DB 缓存命中时跳过推理（重启秒开）；OCR 按钮强制重识别 + 失败重试
+
+**模型分发**：模型与 DLL 不入 git（约 30MB 二进制），
+`src-tauri/resources/models/download.ps1` 一键下载（rapidocr wheel + NuGet）。
+
+**性能**：A4 300 DPI 页面端到端 debug 约 2.8s / **release 约 0.42s**（debug 的
+PNG 解码极慢，release 下 det 推理 ~85ms、后处理 ~150ms、rec ~620ms 为 debug
+数值；release 全套 <0.5s）。识别批量 6 条/批。
+
+**验证**：
+- `cargo run --bin ocr_smoke -- <image.png>` 冒烟测试二进制（开发工具）
+- 1600×1200 合成文本图：5 行全部识别正确，置信度 0.98+
+- A4 300 DPI 合成页面：5 段全部正确，置信度 0.97+
+- 单元测试 10 个（角点排序/CTC 解码/unclip 扩展/PCA 矩形/旋转裁剪等）
+
+### 2026-08-14：OCR 文本层单词对齐 — 像素级词间隙分割
+
+**背景**：OCR 文本渲染为可选中文本层后，spans 必须与页面图像上的字形吻合，
+否则选词/查词错位。此前经历多轮边距调参（unclip 内边距、tight 框非对称、
+px/pt 单位换算 bug 等），始终无法完全对齐——部分单词仍有约 1 个字符的偏移，
+且无规律。
+
+**根因**：单词位置由 CTC 解码时间戳线性插值得到。CTC 时间步与水平像素大致
+成比例，但字形宽窄不一（"i"约 5px、"m"约 30px @300 DPI），线性映射在变宽
+字形上必然漂移。这是模型时序估计的固有误差，调参无法消除（Acrobat 用的是
+自研引擎的字形模板对齐，本技术栈不可达）。
+
+**v1 过渡方案（CTC 峰值中点）**：`ctc_decode` 记录每个字符的发射峰值时间步，
+词边界取相邻峰的中点。词边界误差收敛到 ±10px（≈0.25 字符，仿真验证），
+用户实测仍有部分单词移位。
+
+**v2 最终方案（像素级词间隙分割）**：`OcrBox.v = 2`，新增 `word_bounds`
+字段——单词边界直接取自图像里的真实词间隙：
+
+- 对 tight 范围内的**原图**做列剖面（每列暗像素计数，亮度阈值 160）
+- 零墨迹列段 = 间隙；词间隙系统性宽于字间隙，取 `词数-1` 个最宽空段
+  为词边界；CTC 仅提供词数做对齐校验，不参与定位
+- 采纳门槛：最小选中间隙 ≥ 最大未选间隙 × 1.5 且 ≥ 2px——否则间隙结构
+  歧义，该行回退到 v1 峰值中点方案
+- 前端 `renderWordSpans` 优先用 `word_bounds`（tight 框比例映射）；
+  `PdfPage` 缓存检查要求 `v >= 2`，旧缓存自动重新识别
+
+**两个关键坑**：
+
+1. **det 特征图分辨率不够**：约 2.5× 下采样后词间隙仅 2-3 列宽，膨胀后
+   完全闭合（实测 zero-runs=0）。必须在原图上做剖面。
+2. **det 掩码漏检细的顶部笔画**（大写 T 横杠、升部）：tight 框被垂直截断
+   后，"Th" 内部出现 14px 假间隙，与真实词间隙同宽，导致歧义拒绝。
+   修复：剖面采样行上下各扩 35% tight 高度，补回被截断的笔画。
+
+**验证**：
+- 校准图 12/12 词全部提取：词间隙 14-17px、字间隙 ≤6px，分离清晰
+- 多行扫描页 7 行全部成功（含 13 词密集段落行，分离度 2.8×）
+- Python 独立交叉验证：每个词的 span 精确落在图像像素上
+- 单元测试 14 个（新增 word_segments 4 个：基本分割/三词/等宽歧义拒绝/
+  间隙不足拒绝）
+
 ## 未解决的问题
 
 - [ ] 大 PDF 首次打开时页面缩略图/快速定位功能缺失

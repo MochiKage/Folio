@@ -18,6 +18,11 @@ src-tauri/target
 # Large dictionary files — not tracked in git
 src-tauri/resources/stardict.db
 
+# OCR models + ONNX Runtime DLL — run src-tauri/resources/models/download.ps1
+src-tauri/resources/models/*.onnx
+src-tauri/resources/models/ppocr_keys_v1.txt
+src-tauri/resources/lib/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

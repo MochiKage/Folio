@@ -1,9 +1,12 @@
 use rusqlite::{Connection, Result as SqliteResult};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
+/// `Arc<Mutex>` conn so `Database` can be cloned and moved into
+/// `spawn_blocking` tasks (e.g. the OCR command) while Tauri holds its copy.
+#[derive(Clone)]
 pub struct Database {
-    pub conn: Mutex<Connection>,
+    pub conn: Arc<Mutex<Connection>>,
 }
 
 impl Database {
@@ -16,7 +19,7 @@ impl Database {
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
 
         let db = Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
         };
         db.initialize_schema()?;
         db.run_migrations()?;

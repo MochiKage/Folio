@@ -1,19 +1,3 @@
-/** Minimal interfaces matching PDF.js text content types (v6 compat). */
-interface TextItem {
-  str: string
-  dir?: string
-  width?: number
-  height?: number
-  transform?: number[]
-  fontName?: string
-  hasEOL?: boolean
-}
-
-interface TextContent {
-  items: TextItem[]
-  styles?: Record<string, unknown>
-}
-
 /**
  * Minimum number of non-whitespace characters required to consider a page
  * as having embedded text. Scanned PDFs sometimes have tiny OCR remnants
@@ -24,11 +8,16 @@ const MIN_EMBEDDED_CHARS = 8
 /**
  * Check whether a page has meaningful embedded text content.
  * Returns false for pure-scanned pages (no text layer in the PDF).
+ *
+ * The parameter is structural so it accepts pdf.js 6.x TextContent whose
+ * items are `(TextItem | TextMarkedContent)[]`. The index signature keeps
+ * the element type from being "weak" (TS rejects TextMarkedContent against
+ * an all-optional type with no shared properties).
  */
-export function hasEmbeddedText(tc: TextContent): boolean {
-  const chars = tc.items
-    .filter((it): it is TextItem => 'str' in it)
-    .reduce((n: number, it: TextItem) => n + it.str.trim().length, 0)
+export function hasEmbeddedText(tc: {
+  items: ReadonlyArray<{ str?: string; [key: string]: unknown }>
+}): boolean {
+  const chars = tc.items.reduce((n, it) => n + (it.str?.trim().length ?? 0), 0)
   return chars >= MIN_EMBEDDED_CHARS
 }
 
