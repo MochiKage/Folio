@@ -48,3 +48,7 @@ test_clean.pdf
 The Art of Electronics 3rd Edition.pdf
 test_skewed_*.png
 test_noisy_s*.png
+
+# Debug tooling (CDP harness, ad-hoc test PDF)
+scripts/debug-*.mjs
+test_text.pdf

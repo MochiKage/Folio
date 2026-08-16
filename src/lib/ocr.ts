@@ -2,7 +2,7 @@ import type { PageViewport, PDFPageProxy } from 'pdfjs-dist'
 import type { OcrBox } from './api'
 import * as api from './api'
 import { enqueueOcrJob, useOcrStore } from '../stores/ocrStore'
-import { hasEmbeddedText } from './textLayer'
+import { hasEmbeddedText, type TextContent } from './textLayer'
 
 /** DPI used when rendering a page for OCR input (pixels per inch) */
 export const OCR_DPI = 300
@@ -309,7 +309,7 @@ function createFittedSpan(
   return span
 }
 
-interface WordRect {
+export interface WordRect {
   text: string
   /** Word extent in PDF pt (y-range = the line's anchor band) */
   rect: { x0: number; y0: number; x1: number; y1: number }
@@ -327,7 +327,7 @@ interface WordRect {
  * strokes like "T"). Margins are relative to the em-equivalent
  * inkH × 1.27, matching the rendered font size.
  */
-function extractWordRects(box: OcrBox): WordRect[] | null {
+export function extractWordRects(box: OcrBox): WordRect[] | null {
   const text = box.text
   const n = text.length
   if (n === 0) return null
@@ -568,12 +568,16 @@ export async function renderPageForOcr(
  * Returns [] without touching the store when the page has embedded text
  * and force-OCR is off (nothing to OCR — the native text layer is
  * used). Failures set the page status to 'error' and rethrow.
+ *
+ * `precomputedText` reuses an earlier getTextContent result (the search
+ * classification pass already parsed the page) instead of re-parsing.
  */
 export async function runOcrPageIfNeeded(
   docId: string,
   pageNumber: number,
   page: PDFPageProxy,
   priority: 'user' | 'prefetch' = 'user',
+  precomputedText?: TextContent,
 ): Promise<OcrBox[]> {
   return enqueueOcrJob(
     docId,
@@ -595,7 +599,7 @@ export async function runOcrPageIfNeeded(
         useOcrStore.getState().setPageResult(docId, pageNumber, cached.boxes)
         return cached.boxes
       }
-      const textContent = await page.getTextContent()
+      const textContent = precomputedText ?? (await page.getTextContent())
       if (!useOcrStore.getState().forceOcr && hasEmbeddedText(textContent)) {
         return [] // embedded text — nothing to OCR, keep store untouched
       }

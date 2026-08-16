@@ -491,12 +491,68 @@ JPEG q85 嵌入（→14M/9.4M，解码行为贴近真实书），PNG 保留给 s
 **验证**：JPEG 版夹具重测加载卡顿消失；清理掉内置垃圾 OCR 层的真实
 英文书自动识别 + 邻页预取通过。
 
+### 2026-08-16：全文搜索（FTS）落地 + WebView2 快捷键 + 阅读体验修复
+
+**功能**：ROADMAP #1 全文搜索完成。三源搜索：已 OCR 页走 Rust
+`search_document` 命令（`ocr_cache.text` LIKE 子串匹配、通配符转义、
+不区分大小写、±40 字符片段、返回全部缓存页清单区分三类页面）；内嵌
+文本页走 JS 会话级索引（getTextContent 缓存 Map，与 PdfPage 共享避免
+双重解析，逐字符 toLowerCase 保持 1:1 下标映射）；未 OCR 扫描页后台
+批量 OCR（复用 ocrStore 串行队列 + 'prefetch' 优先级，**分批入队每批
+8 页**——暂停只停调度新批；结果边识别边流入，进度实时）。Ctrl+F 浮动
+搜索条 + 侧栏 Search 面板（两者结合）；高亮走 AnnotationOverlay 同款
+"PDF 坐标存储 + 渲染时 viewport 转换"模式，缩放/旋转自动正确；gen
+令牌防文档切换脏结果；单页高亮矩形上限 200。
+
+**坑：WebView2 浏览器加速键吞 Ctrl+F/Ctrl+A**：WebView2 在浏览器层
+原生处理这些组合键，页面 JS 永远收不到 keydown——表现即"快捷键没用/
+Ctrl+A 全选整个 DOM 含 UI 文字"。解决：Rust setup 中
+`ICoreWebView2Settings3.SetAreBrowserAcceleratorKeysEnabled(false)`
+（属性在 **Settings3** 接口上，需从 `Settings()` cast；`with_webview`
+闭包返回 ()，错误只能内部记录；结果 log 打点便于排查）。Ctrl+A 按需求
+完全屏蔽。配套经验：IDE 的 rust-analyzer 可能长期显示旧代码的诊断
+（行号与磁盘内容对不上即为过期快照）——以 `cargo check` 为准，
+Restart Server 刷新即可。
+
+**坑：高亮双重缩放坐标 bug**：PDF.js `TextItem.width` 本身已是用户
+空间值，itemSubRect 又乘了 transform 的缩放分量（字体号）——矩形被
+放大 11 倍飞离文字（实测 x0=732pt/2602pt，远超 612pt 页面），表现即
+"高亮错页+重叠"。修法：沿**单位方向向量**（t[0]/h、t[3]/h）映射，
+band 偏移直接加（h=hypot(t[2],t[3]) 已是用户空间字高）。实测修复后
+矩形精确贴合单词（132→167pt @ 11pt 字号）。字符级细分按 item 内
+charOff 比例切子矩形。
+
+**坑：Chromium 逻辑属性 margin-inline:auto 在 flex 主轴失效**：
+Tailwind `mx-auto`（生成 margin-inline:auto）在 flex 行主轴上不吸收
+自由空间，静默解析为 0——页面一直贴左（历史遗留，非本轮引入）。修法：
+`.pdf-page` 改用**物理** `margin-left/right:auto`（窄于阅读区居中，
+宽于阅读区归零左锚定）。手动缩放下的"视觉居中"用滚动偏移实现：布局
+保持左锚定（溢出安全），`scrollLeft=(scrollWidth-clientWidth)/2` 后
+两侧均可达（旧的 justify-center 会让左侧溢出进负坐标区滚动条够不到）。
+默认缩放改 Fit 宽度（-1）。默认/放大/缩小三态已实测居中。
+
+**其他体验修复**：Ctrl+滚轮改 **25% 刻度吸附**（对齐状态栏预设；
+Fit 模式以当前视觉缩放为基准起步）；搜索跳转两阶段滚动（立即滚到
+占位位置即时反馈，渲染完成后高度有变再修正；上方页高度全已知时一次
+到位）；Fit 宽度 resize 重算 rAF 节流 + 变化 <0.5% 跳过（拖拽缩放
+不再逐像素全量重渲染）。
+
+**环境事故与教训**：调试中 pnpm/npm 安装尝试（版本不匹配 + 根目录
+误装）损坏了运行中 vite 的 `.vite/deps` 预构建缓存——动态导入
+`@tauri-apps/plugin-fs` 加载失败/挂起，HMR 状态不一致疑似"高亮消失/
+快捷键失灵"的元凶。教训：① 运行中的 pnpm 项目不要混用 npm 安装；
+② 依赖缓存损坏的表现是"已加载模块正常、新动态导入挂起"，重启 dev
+服务器即愈；③ 无头 Edge 诊断的浏览器配置目录若放在项目树内，vite
+会把 Code Cache 写入当源码变更疯狂全量重载——配置目录必须放项目外。
+
 ## 未解决的问题
+
+> 规划中的功能与优先级见 [ROADMAP.md](ROADMAP.md)；以下为历史遗留清单。
 
 - [ ] 大 PDF 首次打开时页面缩略图/快速定位功能缺失
 - [ ] 标注编辑器（PDF.js AnnotationEditorLayer）未集成
 - [ ] TTS 语音朗读引擎待集成
-- [ ] 搜索不区分大小写、无正则支持
+- [x] 搜索不区分大小写、无正则支持（全文搜索已落地，见 2026-08-16）
 - [ ] 无打印、导出功能
 - [ ] 词组/短语动词词典覆盖不足（stardict 340 万中仅 ~800 个高质量词组）
 - [ ] OCR 性能优化·余项（dev opt-level + 邻页预取已完成；角度便宜估算器 / DirectML / 页级并行暂缓备用）

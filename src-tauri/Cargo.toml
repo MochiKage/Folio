@@ -40,3 +40,10 @@ rusqlite = { version = "0.34", features = ["bundled"] }
 # rc.13 needs ORT >= 1.17 — we ship 1.23.2 (see resources/models/download.ps1).
 ort = { version = "=2.0.0-rc.13", features = ["load-dynamic"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
+
+# Windows-only: disable WebView2 browser accelerator keys (Ctrl+F / Ctrl+A
+# / F5 …) so the app's own shortcuts reach the webview. Versions must match
+# the ones tauri itself depends on (see Cargo.lock).
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.38"
+windows-core = "0.61"

@@ -1,7 +1,7 @@
 import {
   Sun, Moon, BookOpen, Sidebar, Maximize2, Minimize2,
   ListTree, Bookmark, Highlighter, BookOpenText, LibraryBig,
-  Globe,
+  Globe, Search,
 } from 'lucide-react'
 import { useAppStore, type Theme, type SidebarTab } from '../stores/appStore'
 
@@ -15,6 +15,7 @@ const tabs: { id: SidebarTab; label: string; icon: typeof ListTree }[] = [
   { id: 'vocabulary', label: 'Vocabulary', icon: BookOpenText },
   { id: 'dictionary', label: 'Dictionary', icon: Globe },
   { id: 'library', label: 'Library', icon: LibraryBig },
+  { id: 'search', label: 'Search', icon: Search },
 ]
 
 export default function TitleBar() {

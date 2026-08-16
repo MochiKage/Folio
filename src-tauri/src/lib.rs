@@ -165,6 +165,44 @@ pub fn run() {
                         .build(),
                 )?;
             }
+
+            // ── WebView2: disable browser accelerator keys ──────────
+            // Ctrl+F / Ctrl+A / F5 … are handled natively by WebView2
+            // before the page ever sees a keydown — the app's own
+            // shortcuts (Ctrl+F search bar, Ctrl+A page selection)
+            // would never fire. Devtools stay available via right-click
+            // → Inspect (AreDevToolsEnabled is untouched).
+            #[cfg(target_os = "windows")]
+            {
+                use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3;
+                use windows_core::Interface as _;
+                if let Some(window) = app.get_webview_window("main") {
+                    // The closure returns () — errors are logged inside;
+                    // discard the (must_use) Result of with_webview itself.
+                    let _ = window.with_webview(|webview| {
+                        let controller = webview.controller();
+                        let result = (|| -> Result<(), String> {
+                            let core = unsafe { controller.CoreWebView2() }
+                                .map_err(|_| "CoreWebView2 unavailable".to_string())?;
+                            let settings = unsafe { core.Settings() }
+                                .map_err(|_| "CoreWebView2 Settings unavailable".to_string())?;
+                            // The property lives on ICoreWebView2Settings3.
+                            let settings3: ICoreWebView2Settings3 = settings
+                                .cast()
+                                .map_err(|_| "ICoreWebView2Settings3 unavailable".to_string())?;
+                            unsafe { settings3.SetAreBrowserAcceleratorKeysEnabled(false) }
+                                .map_err(|_| {
+                                    "failed to disable browser accelerator keys".to_string()
+                                })?;
+                            Ok(())
+                        })();
+                        match result {
+                            Ok(()) => log::info!("WebView2 browser accelerator keys disabled"),
+                            Err(e) => log::warn!("WebView2 accelerator setup failed: {e}"),
+                        }
+                    });
+                }
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -198,6 +236,8 @@ pub fn run() {
             commands::ocr::run_ocr,
             commands::ocr::delete_ocr_result,
             commands::ocr::ocr_model_status,
+            // Full-text search
+            commands::search::search_document,
             // Dictionary
             commands::dictionary::lookup_word,
             commands::dictionary::list_dictionaries,

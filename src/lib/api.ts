@@ -334,3 +334,23 @@ export function ocrModelStatus(): Promise<{
 }> {
   return invoke('ocr_model_status')
 }
+
+// ─── Full-text search ──────────────────────────────
+export interface OcrSearchHit {
+  page: number
+  snippet: string
+}
+
+export interface OcrSearchResult {
+  /** Every page that has an ocr_cache row — lets the frontend tell
+   *  "already OCR'd" apart from "embedded text / not yet OCR'd". */
+  cached_pages: number[]
+  hits: OcrSearchHit[]
+}
+
+export function searchDocument(
+  docId: string,
+  query: string
+): Promise<OcrSearchResult> {
+  return invoke('search_document', { docId, query })
+}

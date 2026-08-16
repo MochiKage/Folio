@@ -4,8 +4,10 @@ import { usePdfStore } from '../stores/pdfStore'
 import { useAppStore } from '../stores/appStore'
 import { useAnnotationStore } from '../stores/annotationStore'
 import { useOcrStore } from '../stores/ocrStore'
+import { useSearchStore } from '../stores/searchStore'
 import { usePdfLoader } from '../hooks/usePdfLoader'
 import PdfPage from './PdfPage'
+import SearchBar from './SearchBar'
 import { open } from '@tauri-apps/plugin-dialog'
 import * as api from '../lib/api'
 import { generateId } from '../lib/selection'
@@ -71,6 +73,8 @@ export default function ReaderViewport() {
 
   // Page dimensions for fit-width / fit-page calculations
   const [pageDims, setPageDims] = useState({ w: 612, h: 792 })
+  const pageDimsRef = useRef(pageDims)
+  pageDimsRef.current = pageDims
 
   // Get actual page dimensions from first page
   useEffect(() => {
@@ -94,15 +98,34 @@ export default function ReaderViewport() {
     return 1.5
   }, [zoom, pageDims])
 
-  // Recompute fit-width on resize via a simple listener
+  // Recompute fit-width on resize — rAF-throttled (drag-resize fires per
+  // pixel; re-rendering every visible page per pixel is the jank source)
+  // and skipped while the resulting zoom doesn't move beyond ~0.5%.
   const [, forceUpdate] = useState(0)
   useEffect(() => {
     if (zoom > 0) return
     const container = containerRef.current
     if (!container) return
-    const obs = new ResizeObserver(() => forceUpdate((n) => n + 1))
+    let raf = 0
+    let lastZoom = 0
+    const obs = new ResizeObserver(() => {
+      if (raf) return
+      raf = requestAnimationFrame(() => {
+        raf = 0
+        const next = Math.max(
+          0.25,
+          (container.clientWidth - 32) / pageDimsRef.current.w,
+        )
+        if (Math.abs(next - lastZoom) < 0.005) return
+        lastZoom = next
+        forceUpdate((n) => n + 1)
+      })
+    })
     obs.observe(container)
-    return () => obs.disconnect()
+    return () => {
+      if (raf) cancelAnimationFrame(raf)
+      obs.disconnect()
+    }
   }, [zoom])
 
   // ─── Virtualized rendering: only show pages near viewport ───
@@ -112,6 +135,8 @@ export default function ReaderViewport() {
   const visibleRef = useRef(visiblePages)
   visibleRef.current = visiblePages
   const [pageHeights, setPageHeights] = useState<Map<number, number>>(new Map())
+  const pageHeightsRef = useRef(pageHeights)
+  pageHeightsRef.current = pageHeights
 
   const pages = useMemo(() => {
     if (!pdfDoc) return []
@@ -167,13 +192,33 @@ export default function ReaderViewport() {
       return next
     })
 
-    // Force target page to render, then scroll after canvas is done
-    const tryScroll = () => {
-      const el = document.querySelector(`[data-page-number="${page}"]`)
-      if (el) {
-        el.scrollIntoView({ block: 'start' })
-        clearScrollTarget()
+    // Phase 1: scroll immediately to the placeholder (instant feedback).
+    // Placeholder divs exist for every page, so no render wait is needed;
+    // the position may be off when pages above still hold stale heights.
+    document
+      .querySelector(`[data-page-number="${page}"]`)
+      ?.scrollIntoView({ block: 'start' })
+
+    // Phase 2: correct after the target page renders with real
+    // dimensions. Skipped when every page above already has a known
+    // height (the first scroll was exact).
+    const heights = pageHeightsRef.current
+    let known = true
+    for (let p = 1; p < page; p++) {
+      if (!heights.has(p)) {
+        known = false
+        break
       }
+    }
+    if (known) {
+      clearScrollTarget()
+      return
+    }
+    const tryScroll = () => {
+      document
+        .querySelector(`[data-page-number="${page}"]`)
+        ?.scrollIntoView({ block: 'start' })
+      clearScrollTarget()
     }
     // rAF x 2 = after React commit + layout; then 120ms for canvas render
     requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(tryScroll, 120)))
@@ -191,7 +236,10 @@ export default function ReaderViewport() {
         path: filePath,
         doc: pdfDoc,
         currentPage: 1,
-        zoom: 1.5,
+        // Default to fit-width (-1): the page always fits the reader
+        // area and centers. A fixed zoom wider than the reader leaves
+        // the page left-anchored (overflow-safe by design).
+        zoom: -1,
         totalPages,
       })
       // Ensure a document record exists for FK constraints (annotations,
@@ -256,26 +304,43 @@ export default function ReaderViewport() {
     }
   }, [activePage, setPage])
 
-  // Zoom with rAF debounce
+  // Zoom with rAF debounce — 25% grid steps (matches the StatusBar
+  // presets; from fit-width the current visual zoom is the base).
   const handleWheel = useCallback((e: React.WheelEvent) => {
     if (!e.ctrlKey) return
     e.preventDefault()
     const current = usePdfStore.getState().zoom
-    const next = Math.min(5, Math.max(0.25, current - e.deltaY * 0.01))
+    const base = current > 0 ? current : effectiveZoom
+    const step = 0.25
+    const raw = base - Math.sign(e.deltaY) * step
+    const next = Math.min(5, Math.max(0.25, Math.round(raw / step) * step))
     if (zoomRafRef.current) cancelAnimationFrame(zoomRafRef.current)
     zoomRafRef.current = requestAnimationFrame(() => {
-      setZoom(Math.round(next * 100) / 100)
+      setZoom(next)
       zoomRafRef.current = null
     })
-  }, [setZoom])
+  }, [setZoom, effectiveZoom])
 
   // Keyboard shortcuts
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'F11') { e.preventDefault(); useAppStore.getState().toggleFocusMode() }
       if (e.key === 'Escape') {
+        const search = useSearchStore.getState()
+        if (search.barOpen) { e.preventDefault(); search.closeBar(); return }
         const s = useAppStore.getState()
         if (s.focusMode) { e.preventDefault(); s.toggleFocusMode() }
+      }
+      // Full-text search bar (suppresses the WebView's native find)
+      if (e.ctrlKey && e.key === 'f') {
+        e.preventDefault()
+        useSearchStore.getState().openBar()
+      }
+      // Ctrl+A: disabled entirely — browser native select-all grabs the
+      // whole document including UI text; per-page selection is
+      // available by dragging over the text layer instead.
+      if (e.ctrlKey && e.key === 'a') {
+        e.preventDefault()
       }
       if (e.ctrlKey && e.key === 'b') { e.preventDefault(); useAppStore.getState().toggleSidebar() }
       if (e.ctrlKey && e.key === 'o') { e.preventDefault(); handleOpenFile() }
@@ -305,6 +370,42 @@ export default function ReaderViewport() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [handleOpenFile, setZoom])
+
+  // ─── Manual zoom centering ────────────────────────
+  // At manual zoom the page can be wider than the reader. The layout
+  // stays left-anchored (overflow-safe — centering via justify-center
+  // made the left overflow unreachable, see DEVLOG 2026-08-14), but
+  // the scroll position is offset so the page APPEARS centered and
+  // both sides stay reachable by scrolling.
+  const prevZoomRef = useRef<number | null>(null)
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container || !pdfDoc) return
+    const prev = prevZoomRef.current
+    prevZoomRef.current = effectiveZoom
+    if (prev !== null && Math.abs(prev - effectiveZoom) < 0.001) return
+
+    // Wait until the pages re-render at the new zoom (scrollWidth
+    // settles) before centering — same polling idea as the rotation
+    // reading-position restore.
+    let raf = 0
+    let frames = 0
+    let prevScrollW = 0
+    let settled = 0
+    const apply = () => {
+      frames++
+      const sw = container.scrollWidth
+      settled = Math.abs(sw - prevScrollW) < 1 ? settled + 1 : 0
+      prevScrollW = sw
+      if (frames < 3 || (settled < 2 && frames < 90)) {
+        raf = requestAnimationFrame(apply)
+        return
+      }
+      container.scrollLeft = Math.max(0, (sw - container.clientWidth) / 2)
+    }
+    raf = requestAnimationFrame(apply)
+    return () => cancelAnimationFrame(raf)
+  }, [effectiveZoom, pdfDoc])
 
   // ─── Rotation with reading-position preservation ───
   // Before rotating, capture the PDF-space point at the viewport center
@@ -461,6 +562,8 @@ export default function ReaderViewport() {
           )}
         </svg>
       </button>
+
+      <SearchBar />
 
       <div className="flex flex-col items-center py-6">
         {pages.map((pageNum) => {

@@ -1,3 +1,10 @@
+import type { PDFPageProxy } from 'pdfjs-dist'
+
+/** A page's parsed text content (pdf.js TextContent). pdfjs-dist does
+ *  not re-export this type from its root, so derive it from the page
+ *  proxy's getTextContent return type. */
+export type TextContent = Awaited<ReturnType<PDFPageProxy['getTextContent']>>
+
 /**
  * Minimum number of non-whitespace characters required to consider a page
  * as having embedded text. Scanned PDFs sometimes have tiny OCR remnants
@@ -33,8 +40,9 @@ type ScriptCategory = 'space-separated' | 'no-space'
  * Returns the script category for a Unicode code point.
  * CJK characters, Japanese kana, and Korean hangul are "no-space";
  * everything else defaults to "space-separated" (Latin, Cyrillic, etc.).
+ * Exported for the search snippet builder (search.ts).
  */
-function scriptCategory(cp: number): ScriptCategory {
+export function scriptCategory(cp: number): ScriptCategory {
   if (
     (cp >= 0x4e00  && cp <= 0x9fff)  || // CJK Unified Ideographs
     (cp >= 0x3400  && cp <= 0x4dbf)  || // CJK Extension A

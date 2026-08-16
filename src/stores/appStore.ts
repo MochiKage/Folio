@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 
 export type Theme = 'light' | 'dark' | 'parchment'
-export type SidebarTab = 'outline' | 'bookmarks' | 'annotations' | 'vocabulary' | 'library' | 'dictionary'
+export type SidebarTab = 'outline' | 'bookmarks' | 'annotations' | 'vocabulary' | 'library' | 'dictionary' | 'search'
 export type LayoutMode = 'single' | 'scroll' | 'spread' | 'fit-width' | 'fit-height'
 
 interface AppState {

@@ -4,4 +4,5 @@ pub mod bookmarks;
 pub mod vocabulary;
 pub mod tags;
 pub mod ocr;
+pub mod search;
 pub mod dictionary;

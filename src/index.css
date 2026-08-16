@@ -187,6 +187,16 @@ body {
 /* Lazy loading handled by IntersectionObserver — off-screen pages don't mount */
 .pdf-page {
   /* No contain — let text layer spans position freely */
+
+  /* Center pages horizontally when they fit the reader. PHYSICAL auto
+   * margins — Tailwind's mx-auto (margin-inline: auto) does not absorb
+   * free space on the flex main axis in Chromium, so the logical
+   * version silently resolves to 0 and pages hug the left. Auto margins
+   * still collapse to 0 when the page is wider than the reader (the
+   * overflow case — left-anchored, scroll-reachable, see the zoom
+   * centering in ReaderViewport). */
+  margin-left: auto;
+  margin-right: auto;
 }
 
 .reader-container {
@@ -196,4 +206,18 @@ body {
 /* Smooth sidebar open/close → Fit Width recalculates smoothly */
 .reader-container > div {
   transition: transform 0.2s ease-out;
+}
+
+/* ─── Search-result highlights ───────────────────── */
+/* Overlay divs rendered between the canvas and the text layer
+   (SearchHighlightOverlay.tsx). */
+.search-highlight {
+  position: absolute;
+  background-color: rgba(255, 200, 20, 0.35);
+  border-radius: 2px;
+}
+
+.search-highlight.current {
+  background-color: rgba(255, 130, 0, 0.6);
+  outline: 1px solid rgba(255, 130, 0, 0.9);
 }

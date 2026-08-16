@@ -2,12 +2,14 @@ import { useRef, useEffect, useCallback, memo } from 'react'
 import type { PDFPageProxy, PageViewport } from 'pdfjs-dist'
 import { pdfjsLib } from '../lib/pdfjs'
 import { renderOcrTextLayer, runOcrPageIfNeeded } from '../lib/ocr'
+import { getEmbeddedPageText } from '../lib/search'
 import { mergeParagraphLines, hasEmbeddedText } from '../lib/textLayer'
 import { useOcrStore } from '../stores/ocrStore'
 import { useContextMenuStore } from '../stores/contextMenuStore'
 import { useAnnotationStore } from '../stores/annotationStore'
 import { selectionToPdfRects, mergeRects, rectsOverlap, getWordAtCaretPoint } from '../lib/selection'
 import AnnotationOverlay from './AnnotationOverlay'
+import SearchHighlightOverlay from './SearchHighlightOverlay'
 import type { Annotation } from '../lib/api'
 
 /** Stable empty array to avoid re-renders from `?? []` (same pattern as AnnotationOverlay) */
@@ -275,8 +277,11 @@ const PdfPage = memo(function PdfPage({
     const ctx = canvas.getContext('2d')!
     ctx.clearRect(0, 0, canvas.width, canvas.height)
 
-    // Fetch text content in parallel with canvas render
-    const textContentPromise = page.getTextContent()
+    // Fetch text content in parallel with canvas render. Reuse the
+    // search session cache when present (shared with the search pass).
+    const textContentPromise = documentId
+      ? getEmbeddedPageText(documentId, pageNumber, page)
+      : page.getTextContent()
     const renderTask = page.render({ canvas, viewport })
     renderTaskRef.current = renderTask
 
@@ -358,7 +363,7 @@ const PdfPage = memo(function PdfPage({
         console.error('[PdfPage] render failed:', e)
       }
     }
-  }, [page, zoom, rotation, forceOcr, debugTextLayer, cachedBoxes, pageStatus, runOcrForPage])
+  }, [page, zoom, rotation, forceOcr, debugTextLayer, cachedBoxes, pageStatus, runOcrForPage, documentId, pageNumber])
 
   useEffect(() => {
     renderPage()
@@ -369,10 +374,17 @@ const PdfPage = memo(function PdfPage({
   }, [renderPage])
 
   return (
-    <div className="pdf-page relative mx-auto mb-4 shadow-lg" data-page-number={pageNumber}>
+    <div className="pdf-page relative mb-4 shadow-lg" data-page-number={pageNumber}>
       <canvas ref={canvasRef} className="block" />
       {documentId && (
         <AnnotationOverlay
+          documentId={documentId}
+          pageNumber={pageNumber}
+          viewport={viewportRef.current}
+        />
+      )}
+      {documentId && (
+        <SearchHighlightOverlay
           documentId={documentId}
           pageNumber={pageNumber}
           viewport={viewportRef.current}
