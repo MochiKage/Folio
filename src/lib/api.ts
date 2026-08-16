@@ -304,7 +304,10 @@ export function runOcr(
   image: Uint8Array,
   imageWidth: number,
   imageHeight: number,
-  viewBox: [number, number, number, number]
+  viewBox: [number, number, number, number],
+  /** Frontend time spent rendering/extracting the 300-DPI pixels (ms) —
+   *  passed through so the backend can log a per-stage breakdown. */
+  renderMs: number
 ): Promise<OcrPageData> {
   return invoke('run_ocr', {
     docId,
@@ -313,6 +316,7 @@ export function runOcr(
     imageWidth,
     imageHeight,
     viewBox,
+    renderMs,
   })
 }
 

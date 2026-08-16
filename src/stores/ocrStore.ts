@@ -71,36 +71,84 @@ export const useOcrStore = create<OcrState>((set) => ({
 }))
 
 // ─── Module-level OCR job queue ──────────────────────
-// Ensures at most one OCR job runs at a time, preventing
-// fast scrolling from firing dozens of parallel 300-DPI renders.
+// Serializes OCR jobs so fast scrolling doesn't fire dozens of
+// parallel 300-DPI renders. Visible-page jobs ('user') jump ahead of
+// background prefetch jobs ('prefetch'); at most one job runs at a
+// time. A request for a page already queued/in-flight returns the
+// first request's promise (dedup) — a user request promotes that
+// page's pending prefetch job to the front.
 
-let queueTail: Promise<unknown> = Promise.resolve()
-const inFlight = new Map<string, Promise<OcrBox[]>>()
+type OcrPriority = 'user' | 'prefetch'
+
+interface PendingJob {
+  key: string
+  fn: () => Promise<OcrBox[]>
+  priority: OcrPriority
+  promise: Promise<OcrBox[]>
+  resolve: (v: OcrBox[]) => void
+  reject: (e: unknown) => void
+}
+
+const pending: PendingJob[] = []
+/** Jobs currently queued or running, by page key (dedup map) */
+const knownJobs = new Map<string, PendingJob>()
+let running = false
+
+function pump(): void {
+  if (running) return
+  const job = pending.shift()
+  if (!job) return
+  running = true
+  void job
+    .fn()
+    .then(
+      (boxes) => job.resolve(boxes),
+      (err) => job.reject(err),
+    )
+    .finally(() => {
+      knownJobs.delete(job.key)
+      running = false
+      pump()
+    })
+}
 
 /**
- * Enqueue an OCR job. If a job for the same page is already in-flight,
- * returns the existing promise (deduplication). Otherwise chains onto
- * the sequential queue so only one new OCR runs at a time.
+ * Enqueue an OCR job. Dedups by page: a second request for the same
+ * page returns the first request's promise. 'user' jobs are inserted
+ * ahead of pending 'prefetch' jobs — an existing pending prefetch for
+ * the same page is promoted instead of re-enqueued.
  */
 export function enqueueOcrJob(
   docId: string,
   page: number,
   fn: () => Promise<OcrBox[]>,
+  priority: OcrPriority = 'user',
 ): Promise<OcrBox[]> {
   const key = pageKey(docId, page)
 
-  const existing = inFlight.get(key)
-  if (existing) return existing
-
-  const job = queueTail.then(async () => {
-    try {
-      return await fn()
-    } finally {
-      inFlight.delete(key)
+  const existing = knownJobs.get(key)
+  if (existing) {
+    if (priority === 'user' && existing.priority === 'prefetch') {
+      existing.priority = 'user'
+      const i = pending.indexOf(existing)
+      if (i > 0) {
+        pending.splice(i, 1)
+        pending.unshift(existing)
+      }
     }
-  })
+    return existing.promise
+  }
 
-  inFlight.set(key, job)
-  queueTail = job.catch(() => {})
-  return job
+  let resolve!: (v: OcrBox[]) => void
+  let reject!: (e: unknown) => void
+  const promise = new Promise<OcrBox[]>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  const job: PendingJob = { key, fn, priority, promise, resolve, reject }
+  if (priority === 'user') pending.unshift(job)
+  else pending.push(job)
+  knownJobs.set(key, job)
+  pump()
+  return promise
 }

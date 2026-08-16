@@ -19,6 +19,13 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2.6.3", features = [] }
 
+# Dev builds run the whole OCR pipeline (full-page bilinear rotation,
+# per-line crops, word profiles) through unoptimized code — ~7x slower
+# than release. opt-level 1 keeps incremental builds fast while closing
+# most of that gap (float semantics are unchanged: same results).
+[profile.dev]
+opt-level = 1
+
 [dependencies]
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }

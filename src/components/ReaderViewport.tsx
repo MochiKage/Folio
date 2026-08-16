@@ -9,6 +9,7 @@ import PdfPage from './PdfPage'
 import { open } from '@tauri-apps/plugin-dialog'
 import * as api from '../lib/api'
 import { generateId } from '../lib/selection'
+import { runOcrPageIfNeeded } from '../lib/ocr'
 import { setRotationHandler } from '../lib/rotationBus'
 
 // How many pages ABOVE and BELOW the viewport to pre-render
@@ -41,6 +42,32 @@ export default function ReaderViewport() {
   useEffect(() => {
     if (activeDocId) fetchAnnotations(activeDocId)
   }, [activeDocId, fetchAnnotations])
+
+  // ─── Neighbor-page OCR prefetch ───
+  // While the user reads page N, quietly OCR page N+1 in the background
+  // (low priority — prefetch jobs never delay the visible page's own
+  // job). Pages with embedded text skip themselves inside the job.
+  useEffect(() => {
+    if (!pdfDoc || !activeDocId) return
+    if (activePage < 1 || activePage >= pdfDoc.numPages) return
+    const next = activePage + 1
+    const st = useOcrStore.getState()
+    const key = `${activeDocId}:${next}`
+    const status = st.statuses[key]
+    if (status !== undefined && status !== 'idle') return
+    if (st.boxes[key]) return
+    let cancelled = false
+    pdfDoc.getPage(next).then((page) => {
+      // No cleanup() — pdf.js caches the page proxy per document and
+      // PdfPageLazy reuses it; destroying it here would break a queued
+      // job if this effect re-runs before the job starts.
+      if (cancelled) return
+      runOcrPageIfNeeded(activeDocId, next, page, 'prefetch').catch((err) => {
+        console.error('[ReaderViewport] OCR prefetch failed:', err)
+      })
+    })
+    return () => { cancelled = true }
+  }, [activePage, activeDocId, pdfDoc])
 
   // Page dimensions for fit-width / fit-page calculations
   const [pageDims, setPageDims] = useState({ w: 612, h: 792 })

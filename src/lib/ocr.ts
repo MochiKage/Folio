@@ -1,5 +1,8 @@
 import type { PageViewport, PDFPageProxy } from 'pdfjs-dist'
 import type { OcrBox } from './api'
+import * as api from './api'
+import { enqueueOcrJob, useOcrStore } from '../stores/ocrStore'
+import { hasEmbeddedText } from './textLayer'
 
 /** DPI used when rendering a page for OCR input (pixels per inch) */
 export const OCR_DPI = 300
@@ -553,4 +556,71 @@ export async function renderPageForOcr(
     height: canvas.height,
     viewBox: viewport.viewBox as [number, number, number, number],
   }
+}
+
+// ─── Shared OCR job (visible pages + neighbor prefetch) ───
+
+/**
+ * OCR one page if it needs it (scanned page, or force-OCR mode), with
+ * DB cache reuse. Shared by the visible-page path ('user' — jumps ahead
+ * of prefetch jobs) and the neighbor-page prefetcher ('prefetch').
+ *
+ * Returns [] without touching the store when the page has embedded text
+ * and force-OCR is off (nothing to OCR — the native text layer is
+ * used). Failures set the page status to 'error' and rethrow.
+ */
+export async function runOcrPageIfNeeded(
+  docId: string,
+  pageNumber: number,
+  page: PDFPageProxy,
+  priority: 'user' | 'prefetch' = 'user',
+): Promise<OcrBox[]> {
+  return enqueueOcrJob(
+    docId,
+    pageNumber,
+    async () => {
+      const cached = await api.getOcrResult(docId, pageNumber)
+      // Reject stale-format cache entries (v < 7 predates the refined
+      // two-pass tilt estimate) — they re-OCR automatically.
+      if (
+        cached &&
+        cached.boxes.length > 0 &&
+        cached.boxes.every(
+          (b) =>
+            (b.v ?? 0) >= 7 &&
+            (b.tx1 ?? 0) > (b.tx0 ?? 0) &&
+            (b.chars?.length ?? 0) > 0,
+        )
+      ) {
+        useOcrStore.getState().setPageResult(docId, pageNumber, cached.boxes)
+        return cached.boxes
+      }
+      const textContent = await page.getTextContent()
+      if (!useOcrStore.getState().forceOcr && hasEmbeddedText(textContent)) {
+        return [] // embedded text — nothing to OCR, keep store untouched
+      }
+      const store = useOcrStore.getState()
+      store.setPageStatus(docId, pageNumber, 'loading')
+      try {
+        const tRender = performance.now()
+        const { pixels, width, height, viewBox } = await renderPageForOcr(page)
+        const renderMs = Math.round(performance.now() - tRender)
+        const res = await api.runOcr(
+          docId,
+          pageNumber,
+          pixels,
+          width,
+          height,
+          viewBox,
+          renderMs,
+        )
+        store.setPageResult(docId, pageNumber, res.boxes)
+        return res.boxes
+      } catch (err) {
+        store.setPageStatus(docId, pageNumber, 'error')
+        throw err
+      }
+    },
+    priority,
+  )
 }

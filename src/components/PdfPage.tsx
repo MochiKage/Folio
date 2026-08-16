@@ -1,14 +1,13 @@
 import { useRef, useEffect, useCallback, memo } from 'react'
 import type { PDFPageProxy, PageViewport } from 'pdfjs-dist'
 import { pdfjsLib } from '../lib/pdfjs'
-import { renderOcrTextLayer, renderPageForOcr } from '../lib/ocr'
+import { renderOcrTextLayer, runOcrPageIfNeeded } from '../lib/ocr'
 import { mergeParagraphLines, hasEmbeddedText } from '../lib/textLayer'
-import { useOcrStore, enqueueOcrJob } from '../stores/ocrStore'
+import { useOcrStore } from '../stores/ocrStore'
 import { useContextMenuStore } from '../stores/contextMenuStore'
 import { useAnnotationStore } from '../stores/annotationStore'
 import { selectionToPdfRects, mergeRects, rectsOverlap, getWordAtCaretPoint } from '../lib/selection'
 import AnnotationOverlay from './AnnotationOverlay'
-import * as api from '../lib/api'
 import type { Annotation } from '../lib/api'
 
 /** Stable empty array to avoid re-renders from `?? []` (same pattern as AnnotationOverlay) */
@@ -47,9 +46,6 @@ const PdfPage = memo(function PdfPage({
   const pageStatus = useOcrStore(
     (s) => (documentId ? s.statuses[`${documentId}:${pageNumber}`] : undefined) ?? 'idle',
   )
-  const setPageStatus = useOcrStore((s) => s.setPageStatus)
-  const setPageResult = useOcrStore((s) => s.setPageResult)
-
   const showContextMenu = useContextMenuStore((s) => s.show)
   const pageAnnotations = useAnnotationStore(
     (s) => (documentId ? s.byPage[`${documentId}:${pageNumber}`] : undefined) ?? EMPTY_ANNOTATIONS,
@@ -234,51 +230,21 @@ const PdfPage = memo(function PdfPage({
   )
 
   /**
-   * Run OCR on this page: DB cache hit → reuse; otherwise render the page
-   * to a 300-DPI PNG and run PaddleOCR in the Rust backend.
+   * Run OCR on this page (scanned page or force-OCR mode).
    *
-   * enqueueOcrJob serializes jobs globally and dedups in-flight requests
-   * (StrictMode double-effects / zoom changes during a run are safe).
-   * On success setPageResult updates the store, which flips `cachedBoxes`
-   * and re-runs renderPage → renderOcrTextLayer.
+   * runOcrPageIfNeeded serializes jobs globally, dedups in-flight
+   * requests (StrictMode double-effects / zoom changes during a run are
+   * safe) and 'user' priority jumps ahead of background prefetch jobs.
+   * On success it updates the store, which flips `cachedBoxes` and
+   * re-runs renderPage → renderOcrTextLayer. Errors set the page status
+   * to 'error' inside the job.
    */
-  const runOcrForPage = useCallback(async () => {
+  const runOcrForPage = useCallback(() => {
     if (!documentId) return
-    try {
-      const boxes = await enqueueOcrJob(documentId, pageNumber, async () => {
-        setPageStatus(documentId, pageNumber, 'loading')
-        const cached = await api.getOcrResult(documentId, pageNumber)
-        // Reject stale-format cache entries (v < 7 predates the refined
-        // two-pass tilt estimate) — they re-OCR automatically.
-        if (
-          cached &&
-          cached.boxes.length > 0 &&
-          cached.boxes.every(
-            (b) =>
-              (b.v ?? 0) >= 7 &&
-              (b.tx1 ?? 0) > (b.tx0 ?? 0) &&
-              (b.chars?.length ?? 0) > 0,
-          )
-        ) {
-          return cached.boxes
-        }
-        const { pixels, width, height, viewBox } = await renderPageForOcr(page)
-        const res = await api.runOcr(
-          documentId,
-          pageNumber,
-          pixels,
-          width,
-          height,
-          viewBox,
-        )
-        return res.boxes
-      })
-      setPageResult(documentId, pageNumber, boxes)
-    } catch (err) {
+    runOcrPageIfNeeded(documentId, pageNumber, page, 'user').catch((err) => {
       console.error('[PdfPage] OCR failed:', err)
-      setPageStatus(documentId, pageNumber, 'error')
-    }
-  }, [documentId, pageNumber, page, setPageStatus, setPageResult])
+    })
+  }, [documentId, pageNumber, page])
 
   const renderPage = useCallback(async () => {
     const canvas = canvasRef.current
@@ -392,7 +358,7 @@ const PdfPage = memo(function PdfPage({
         console.error('[PdfPage] render failed:', e)
       }
     }
-  }, [page, zoom, rotation, forceOcr, debugTextLayer, cachedBoxes, pageStatus, documentId, runOcrForPage])
+  }, [page, zoom, rotation, forceOcr, debugTextLayer, cachedBoxes, pageStatus, runOcrForPage])
 
   useEffect(() => {
     renderPage()

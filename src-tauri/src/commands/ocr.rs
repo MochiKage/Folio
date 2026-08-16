@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -97,6 +98,9 @@ pub fn get_ocr_result(
 /// parameters needed to map image-pixel coordinates back to PDF space:
 ///   - `image_width` / `image_height`: pixel dimensions
 ///   - `view_box`: the page's PDF viewBox [x0, y0, x1, y1] at rotation 0
+///   - `render_ms`: time the frontend spent rendering/extracting the
+///     300-DPI pixels — logged alongside the engine time so the
+///     end-to-end wait can be split per stage (perf diagnosis).
 #[tauri::command]
 pub async fn run_ocr(
     db: State<'_, Database>,
@@ -107,6 +111,7 @@ pub async fn run_ocr(
     image_width: u32,
     image_height: u32,
     view_box: [f32; 4],
+    render_ms: Option<u64>,
 ) -> Result<OcrPageData, String> {
     let db = db.inner().clone();
     let state = Arc::clone(state.inner());
@@ -120,6 +125,7 @@ pub async fn run_ocr(
             image_width,
             image_height,
             view_box,
+            render_ms,
         )
     })
     .await
@@ -135,9 +141,18 @@ fn run_ocr_blocking(
     image_width: u32,
     image_height: u32,
     view_box: [f32; 4],
+    render_ms: Option<u64>,
 ) -> Result<OcrPageData, String> {
     let engine = state.engine()?;
+    let engine_t = Instant::now();
     let (boxes, (img_w, img_h)) = engine.recognize_rgb(image, image_width, image_height)?;
+    let engine_ms = engine_t.elapsed().as_millis();
+    log::info!(
+        "[OCR] page {}: frontend {}ms, engine {}ms",
+        page,
+        render_ms.unwrap_or(0),
+        engine_ms,
+    );
 
     // Map image-pixel boxes (y-down) to PDF space (y-up) via the viewBox.
     // The render used rotation 0 and scale = dpi/72, so the mapping is a
