@@ -63,18 +63,28 @@ body {
 }
 
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
   background: var(--border);
-  border-radius: 4px;
+  border-radius: 5px;
 }
 ::-webkit-scrollbar-thumb:hover {
   background: #888;
+}
+/* The ReadingProgressBar overlays the right (and bottom) edges of the
+ * PDF viewport, so the native scrollbars are hidden entirely. Scrolling
+ * is still driven by the container's overflow:auto — only the visual
+ * chrome is removed. */
+.reader-scroll-container {
+  scrollbar-width: none;
+}
+.reader-scroll-container::-webkit-scrollbar {
+  display: none;
 }
 
 /* ─── PDF.js Text Layer ─────────────────────────── */
@@ -197,6 +207,16 @@ body {
    * centering in ReaderViewport). */
   margin-left: auto;
   margin-right: auto;
+
+  /* Page separator: 1px theme-color outline (drawn with box-shadow so it
+   * adds no layout size — pageHeights stay exact) + a soft drop shadow.
+   * The outline keeps page boundaries visible in dark mode where shadows
+   * disappear into the background. */
+  box-shadow: 0 0 0 1px var(--border), 0 6px 18px rgb(0 0 0 / 0.09);
+}
+
+:root.theme-dark .pdf-page {
+  box-shadow: 0 0 0 1px var(--border), 0 6px 18px rgb(0 0 0 / 0.45);
 }
 
 .reader-container {

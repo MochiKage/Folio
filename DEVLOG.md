@@ -545,11 +545,65 @@ Fit 模式以当前视觉缩放为基准起步）；搜索跳转两阶段滚动�
 服务器即愈；③ 无头 Edge 诊断的浏览器配置目录若放在项目树内，vite
 会把 Code Cache 写入当源码变更疯狂全量重载——配置目录必须放项目外。
 
+## 2026-08-22：翻页方式 + 大 PDF 导航缩略图侧栏
+
+### 翻页方式
+
+**目标**：新增横向单页翻页模式 + 强化页间分隔线；顺手修复两个既有缺陷（打开文档不滚动到上次位置、fit-width 不感知旋转）。
+
+**布局模式**：
+- `appStore.layoutMode` 枚举从 5 值裁为 `'scroll' | 'single'`，localStorage 持久化
+- `pdfStore.addDocument` 追加 `_scrollTarget: doc.currentPage` —— 打开文档自动滚动到上次阅读页（顺手修复进度恢复缺陷）
+- 连续滚动模式：原有纵向滚动不变；竖向滚动条恢复（`scrollbar-width: thin`）
+- 单页（横向）模式：`flex-row` 容器 + `snap-x snap-proximity` + slot 宽 `max(100%, 页宽px)` CSS，页面在 slot 内水平居中
+
+**滚轮翻页**：
+- 单页模式采用标准电子书"页内纵向 + 页尾横向"混合方案：fit-width 下页面完整显示时滚轮直接翻页；高页滚到页底/页顶继续滚才翻页；累积 100px 阈值，方向反转清零；触摸板斜向手势保持原生滚动
+- 共享 `flipToPage(n)` 辅助，键盘 ←/→ 与滚轮共用同一翻页逻辑
+
+**分隔线**：`PdfPage` wrapper 去 `mb-4 shadow-lg`；`.pdf-page` 改 `box-shadow: 0 0 0 1px var(--border), 0 6px 18px rgb(0 0 0 / 0.09)`；暗色加重投影；间距从 mb-4 移至容器 `gap-6`（统一两模式）
+
+**进度条**：自定义 ReadingProgressBar（`fixed` 定位在 main 内右侧/底部，`z-50`），drag/hover 均走 `jumpToPage`，`Tab`+方向键可达
+
+**fit-width 旋转感知**：pageDims effect 加 `rotation` 参数，fit-width 旋转后自动重算缩放（顺手修复旋转 90° 后页面溢出约 29% 的既有缺陷）
+
+**踩坑**：
+- `flex-1` 子项在 flex 列容器里默认 `min-height: auto`，导致 main scrollHeight=0 PDF 白屏——加 `min-h-0` 解决
+- ReadingProgressBar 纵向模式 `w-3 h-full` 作为 flex 兄弟撑开列容器让 main 缩成 0 高——改 `fixed` 定位脱离文档流
+- WebView2 下 `::-webkit-scrollbar:horizontal { display: none }` 意外把整个滚动区隐藏——改全部 `scrollbar-width: none`
+
+### 大 PDF 导航缩略图侧栏
+
+**目标**：长文档缩略图侧栏——点击跳转、滚动高亮当前页、拖动快速翻页。
+
+**架构**：
+- 新建 `ThumbnailsPanel.tsx`（面板编排）+ `Thumbnail.tsx`（单 canvas 渲染）
+- `appStore.SidebarTab` 加 `'thumbnails'`；TitleBar 加 `Pages` 按钮（lucide `LayoutGrid`）；Sidebar switch 加 `case 'thumbnails'`
+- PDF.js 渲染管线直接复用：`page.getViewport({ scale: targetRenderWidth / pageVp1.width, rotation })` + `page.render({ canvas, viewport })`，不参与 DPR（与主视图一致）
+
+**低 DPI scale**：`scale = max(0.06, targetRenderWidth / pageVp1.width)` — 0.06 下限防极度模糊，140px 窄侧栏约 116px 显示像素
+
+**虚拟化**：`IntersectionObserver` + `visibleRef<Set<number>>`（ref 非 state，避免合并复杂性）；IO 只追加不收缩，页面一旦渲染永久保留；`BUFFER = 2` 初始 batch；rootMargin `'80px 0px'` 渐进扩展
+
+**点击/拖动**：`4px` 阈值区分 click vs drag；`window.pointermove` 全局监听 + `setPointerCapture` 双保险；drag 期间 `visibleRef` 不卸载（始终保留已渲染页）
+
+**auto-scroll**：主视图滚动时靠 `jumpToPage` 触发 `activePage` 变化；`activePage` effect 内若目标页已在可见集则 `scrollIntoView`，否则轮询每 200ms 待目标页加载进可见集后再滚动（解决点击远端页时 scrollIntoView 落到 placeholder 位置导致侧栏跳回旧页的问题）
+
+**踩坑**：
+- `containerWidth` 用 `useState` 导致闭包永远读到旧值 → 改 `containerWidthRef.current` 直接读 DOM
+- `visibleSet` 用 `useState` + `setTimeout` stagger 导致快速点击时集合状态污染 → 改 `useRef` 直接 `.add()`，用 `useReducer` 的 `forceUpdate()` 触发渲染，stagger 全删
+- IO observer 在 `useEffect` 闭包里捕获旧 `visibleSet` 导致永远观察不到新页 → observer callback 读取 `visibleRef.current`（ref 在 effect 重新创建时更新）
+
+**既有问题修复勾销**：
+- [DEVLOG 未解决问题] 大 PDF 首次打开时页面缩略图/快速定位功能缺失 → ✅ 完成
+
+---
+
 ## 未解决的问题
 
 > 规划中的功能与优先级见 [ROADMAP.md](ROADMAP.md)；以下为历史遗留清单。
 
-- [ ] 大 PDF 首次打开时页面缩略图/快速定位功能缺失
+- [x] 大 PDF 首次打开时页面缩略图/快速定位功能缺失（缩略图侧栏已完成，见 2026-08-22）
 - [ ] 标注编辑器（PDF.js AnnotationEditorLayer）未集成
 - [ ] TTS 语音朗读引擎待集成
 - [x] 搜索不区分大小写、无正则支持（全文搜索已落地，见 2026-08-16）

@@ -8,6 +8,7 @@ import { useSearchStore } from '../stores/searchStore'
 import { usePdfLoader } from '../hooks/usePdfLoader'
 import PdfPage from './PdfPage'
 import SearchBar from './SearchBar'
+import ReadingProgressBar from './ReadingProgressBar'
 import { open } from '@tauri-apps/plugin-dialog'
 import * as api from '../lib/api'
 import { generateId } from '../lib/selection'
@@ -16,12 +17,15 @@ import { setRotationHandler } from '../lib/rotationBus'
 
 // How many pages ABOVE and BELOW the viewport to pre-render
 const PAGE_BUFFER = 2
+// Wheel input (px) accumulated at a vertical edge before flipping a page
+const WHEEL_FLIP_THRESHOLD = 100
 
 export default function ReaderViewport() {
   const containerRef = useRef<HTMLDivElement>(null)
   const pageRefs = useRef<Map<number, HTMLDivElement>>(new Map())
   const pendingDocRef = useRef<string | null>(null)
   const zoomRafRef = useRef<number | null>(null)
+  const flipAccumRef = useRef(0)
   const observerRef = useRef<IntersectionObserver | null>(null)
   /** Reading anchor captured before a rotation — used to restore the
    *  scroll position once the pages re-render at the new rotation. */
@@ -36,6 +40,7 @@ export default function ReaderViewport() {
 
   const focusMode = useAppStore((s) => s.focusMode)
   const toggleFocusMode = useAppStore((s) => s.toggleFocusMode)
+  const layoutMode = useAppStore((s) => s.layoutMode)
   const { activePage, zoom, rotation, setPage, setZoom, setRotation, addDocument, activeDocId } = usePdfStore()
   const { pdfDoc, loading, error, loadPdfFromPath } = usePdfLoader()
   const fetchAnnotations = useAnnotationStore((s) => s.fetchForDocument)
@@ -76,15 +81,17 @@ export default function ReaderViewport() {
   const pageDimsRef = useRef(pageDims)
   pageDimsRef.current = pageDims
 
-  // Get actual page dimensions from first page
+  // Get actual page dimensions from first page. Rotation is baked into
+  // the viewport, so the dims must be computed at the CURRENT rotation —
+  // fit-width against rotation-0 dims overflows by ~29% after a 90° turn.
   useEffect(() => {
     if (!pdfDoc) return
     pdfDoc.getPage(1).then((page) => {
-      const vp = page.getViewport({ scale: 1 })
+      const vp = page.getViewport({ scale: 1, rotation })
       setPageDims({ w: vp.width, h: vp.height })
       page.cleanup()
     })
-  }, [pdfDoc])
+  }, [pdfDoc, rotation])
 
   // Compute effective zoom: -1 = fit width, -2 = fit page, >0 = manual
   const effectiveZoom = useMemo(() => {
@@ -96,6 +103,8 @@ export default function ReaderViewport() {
     if (zoom === -1) return Math.max(0.25, cw / pageDims.w)
     if (zoom === -2) return Math.max(0.25, Math.min(cw / pageDims.w, ch / pageDims.h))
     return 1.5
+    // rotation needs no dep here — the pageDims effect above recomputes
+    // pageDims at the current rotation, and pageDims is already a dep.
   }, [zoom, pageDims])
 
   // Recompute fit-width on resize — rAF-throttled (drag-resize fires per
@@ -137,6 +146,9 @@ export default function ReaderViewport() {
   const [pageHeights, setPageHeights] = useState<Map<number, number>>(new Map())
   const pageHeightsRef = useRef(pageHeights)
   pageHeightsRef.current = pageHeights
+  const [pageWidths, setPageWidths] = useState<Map<number, number>>(new Map())
+  const pageWidthsRef = useRef(pageWidths)
+  pageWidthsRef.current = pageWidths
 
   const pages = useMemo(() => {
     if (!pdfDoc) return []
@@ -164,7 +176,7 @@ export default function ReaderViewport() {
         })
         if (changed) setVisiblePages(newVisible)
       },
-      { root: container, rootMargin: '300px 0px' }
+      { root: container, rootMargin: '300px 300px' }
     )
 
     // Observe all placeholder divs
@@ -192,22 +204,40 @@ export default function ReaderViewport() {
       return next
     })
 
+    // Single mode scrolls sideways to the page slot; scroll mode scrolls
+    // down to the page top (unchanged behavior).
+    const scrollOpts: ScrollIntoViewOptions =
+      layoutMode === 'single'
+        ? { block: 'start', inline: 'start' }
+        : { block: 'start' }
+
     // Phase 1: scroll immediately to the placeholder (instant feedback).
     // Placeholder divs exist for every page, so no render wait is needed;
     // the position may be off when pages above still hold stale heights.
     document
       .querySelector(`[data-page-number="${page}"]`)
-      ?.scrollIntoView({ block: 'start' })
+      ?.scrollIntoView(scrollOpts)
 
     // Phase 2: correct after the target page renders with real
     // dimensions. Skipped when every page above already has a known
-    // height (the first scroll was exact).
+    // height (the first scroll was exact). In single mode the slot
+    // start also depends on the widths of all preceding pages — require
+    // those to be known too.
     const heights = pageHeightsRef.current
     let known = true
     for (let p = 1; p < page; p++) {
       if (!heights.has(p)) {
         known = false
         break
+      }
+    }
+    if (known && layoutMode === 'single') {
+      const widths = pageWidthsRef.current
+      for (let p = 1; p < page; p++) {
+        if (!widths.has(p)) {
+          known = false
+          break
+        }
       }
     }
     if (known) {
@@ -217,12 +247,12 @@ export default function ReaderViewport() {
     const tryScroll = () => {
       document
         .querySelector(`[data-page-number="${page}"]`)
-        ?.scrollIntoView({ block: 'start' })
+        ?.scrollIntoView(scrollOpts)
       clearScrollTarget()
     }
     // rAF x 2 = after React commit + layout; then 120ms for canvas render
     requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(tryScroll, 120)))
-  }, [scrollTarget])
+  }, [scrollTarget, layoutMode, pdfDoc])
 
   // When pdfDoc changes after loading, register in store AND ensure DB record exists
   useEffect(() => {
@@ -279,16 +309,23 @@ export default function ReaderViewport() {
     }
   }, [loadPdfFromPath])
 
-  // Track current page based on scroll
+  // Track current page based on scroll. Visibility is measured along the
+  // scroll axis: vertical overlap in scroll mode, horizontal overlap in
+  // single mode — in single mode all pages share the same vertical span,
+  // so the vertical formula would tie every page and never leave the
+  // lowest-numbered one.
   const progressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const handleScroll = useCallback(() => {
     const container = containerRef.current
     if (!container) return
+    const single = layoutMode === 'single'
     let bestPage = activePage, bestVis = 0
     pageRefs.current.forEach((el, num) => {
       const r = el.getBoundingClientRect()
       const cr = container.getBoundingClientRect()
-      const vis = (Math.min(r.bottom, cr.bottom) - Math.max(r.top, cr.top)) / r.height
+      const vis = single
+        ? (Math.min(r.right, cr.right) - Math.max(r.left, cr.left)) / r.width
+        : (Math.min(r.bottom, cr.bottom) - Math.max(r.top, cr.top)) / r.height
       if (vis > bestVis) { bestVis = vis; bestPage = num }
     })
     if (bestPage !== activePage) setPage(bestPage)
@@ -302,24 +339,94 @@ export default function ReaderViewport() {
         api.updateReadingProgress(docId, bestPage, bestPage / Math.max(1, total))
       }, 1500)
     }
-  }, [activePage, setPage])
+  }, [activePage, setPage, layoutMode])
+
+  // Flip to a page's slot with a smooth horizontal scroll. Returns false
+  // when already resting at that slot (rapid repeat) or the page number
+  // is out of range. resetVertical restarts the page at its top (wheel
+  // flips); keyboard flips keep the vertical position so a horizontal
+  // turn doesn't disturb reading a tall page.
+  const flipToPage = useCallback((n: number, resetVertical = false) => {
+    const container = containerRef.current
+    if (!container) return false
+    const st = usePdfStore.getState()
+    const total = st.getActiveDoc()?.totalPages ?? 0
+    if (n < 1 || n > total) return false
+    const el = pageRefs.current.get(n)
+    if (!el) return false
+    const cr = container.getBoundingClientRect()
+    const left = el.getBoundingClientRect().left - cr.left + container.scrollLeft
+    // Already resting at this slot's start (rapid repeat after the
+    // smooth scroll settled) — tell the caller to flip one more.
+    if (Math.abs(container.scrollLeft - left) < 4) return false
+    st.setPage(n)
+    container.scrollTo({ left, ...(resetVertical ? { top: 0 } : {}), behavior: 'smooth' })
+    return true
+  }, [])
+
+  // The page currently filling the viewport, derived from scroll
+  // geometry (activePage can lag behind a swipe or mid-animation).
+  const getVisualPage = useCallback(() => {
+    const container = containerRef.current
+    const st = usePdfStore.getState()
+    if (!container) return st.activePage
+    const cr = container.getBoundingClientRect()
+    let visual = st.activePage
+    pageRefs.current.forEach((el, n) => {
+      const l = el.getBoundingClientRect().left - cr.left + container.scrollLeft
+      if (l <= container.scrollLeft + 4) visual = n
+    })
+    return visual
+  }, [])
 
   // Zoom with rAF debounce — 25% grid steps (matches the StatusBar
   // presets; from fit-width the current visual zoom is the base).
   const handleWheel = useCallback((e: React.WheelEvent) => {
-    if (!e.ctrlKey) return
-    e.preventDefault()
-    const current = usePdfStore.getState().zoom
-    const base = current > 0 ? current : effectiveZoom
-    const step = 0.25
-    const raw = base - Math.sign(e.deltaY) * step
-    const next = Math.min(5, Math.max(0.25, Math.round(raw / step) * step))
-    if (zoomRafRef.current) cancelAnimationFrame(zoomRafRef.current)
-    zoomRafRef.current = requestAnimationFrame(() => {
-      setZoom(next)
-      zoomRafRef.current = null
-    })
-  }, [setZoom, effectiveZoom])
+    if (e.ctrlKey) {
+      e.preventDefault()
+      const current = usePdfStore.getState().zoom
+      const base = current > 0 ? current : effectiveZoom
+      const step = 0.25
+      const raw = base - Math.sign(e.deltaY) * step
+      const next = Math.min(5, Math.max(0.25, Math.round(raw / step) * step))
+      if (zoomRafRef.current) cancelAnimationFrame(zoomRafRef.current)
+      zoomRafRef.current = requestAnimationFrame(() => {
+        setZoom(next)
+        zoomRafRef.current = null
+      })
+      return
+    }
+    // Single mode: pure-vertical wheel input at a vertical edge flips
+    // pages horizontally (the book pattern — wheel through a page, then
+    // onto the next; pages that fit vertically flip on every wheel).
+    // Mid-page wheel keeps native vertical scrolling; diagonal trackpad
+    // gestures (deltaX ≠ 0) stay fully native.
+    if (useAppStore.getState().layoutMode === 'single' && e.deltaX === 0 && e.deltaY !== 0) {
+      const container = containerRef.current
+      if (!container) return
+      const atTop = container.scrollTop <= 1
+      const atBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 1
+      const edgeWheel = (e.deltaY < 0 && atTop) || (e.deltaY > 0 && atBottom)
+      if (!edgeWheel) {
+        flipAccumRef.current = 0
+        return
+      }
+      e.preventDefault()
+      // Normalize line-mode wheels (deltaMode 1) to pixels.
+      const d = e.deltaMode === 1 ? e.deltaY * 40 : e.deltaY
+      // A direction reversal (trackpad bounce-back) restarts the
+      // accumulation so opposite deltas don't cancel each other out.
+      if (flipAccumRef.current !== 0 && Math.sign(flipAccumRef.current) !== Math.sign(d)) {
+        flipAccumRef.current = 0
+      }
+      flipAccumRef.current += d
+      if (Math.abs(flipAccumRef.current) < WHEEL_FLIP_THRESHOLD) return
+      const dir = flipAccumRef.current > 0 ? 1 : -1
+      flipAccumRef.current = 0
+      // The next page starts at its top.
+      flipToPage(getVisualPage() + dir, true)
+    }
+  }, [setZoom, effectiveZoom, flipToPage, getVisualPage])
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -330,6 +437,29 @@ export default function ReaderViewport() {
         if (search.barOpen) { e.preventDefault(); search.closeBar(); return }
         const s = useAppStore.getState()
         if (s.focusMode) { e.preventDefault(); s.toggleFocusMode() }
+      }
+      // Page turning in horizontal (single) mode — ←/→ flips pages with
+      // a smooth scroll. Scroll mode keeps the native horizontal scroll.
+      // Inputs keep their cursor-movement keys (search bar, sidebar).
+      if (
+        (e.key === 'ArrowLeft' || e.key === 'ArrowRight') &&
+        useAppStore.getState().layoutMode === 'single'
+      ) {
+        const t = e.target as HTMLElement | null
+        if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return
+        const container = containerRef.current
+        if (!container) return
+        const st = usePdfStore.getState()
+        const total = st.getActiveDoc()?.totalPages ?? 0
+        if (total === 0) return
+        e.preventDefault()
+        const dir = e.key === 'ArrowRight' ? 1 : -1
+        if (!flipToPage(st.activePage + dir)) {
+          // The target slot is already under the viewport (mid-animation
+          // reverse press, or activePage lagging behind a swipe) —
+          // flip from the page currently filling the viewport instead.
+          flipToPage(getVisualPage() + dir)
+        }
       }
       // Full-text search bar (suppresses the WebView's native find)
       if (e.ctrlKey && e.key === 'f') {
@@ -369,7 +499,7 @@ export default function ReaderViewport() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [handleOpenFile, setZoom])
+  }, [handleOpenFile, setZoom, flipToPage, getVisualPage])
 
   // ─── Manual zoom centering ────────────────────────
   // At manual zoom the page can be wider than the reader. The layout
@@ -401,11 +531,49 @@ export default function ReaderViewport() {
         raf = requestAnimationFrame(apply)
         return
       }
-      container.scrollLeft = Math.max(0, (sw - container.clientWidth) / 2)
+      // Single mode: snap back to the active page's slot start (the
+      // slot widths shifted with the zoom). Scroll mode: visual
+      // centering as before.
+      const slot = useAppStore.getState().layoutMode === 'single'
+        ? pageRefs.current.get(usePdfStore.getState().activePage)
+        : null
+      if (slot) {
+        const cr = container.getBoundingClientRect()
+        container.scrollLeft = slot.getBoundingClientRect().left - cr.left + container.scrollLeft
+      } else {
+        container.scrollLeft = Math.max(0, (sw - container.clientWidth) / 2)
+      }
     }
     raf = requestAnimationFrame(apply)
     return () => cancelAnimationFrame(raf)
   }, [effectiveZoom, pdfDoc])
+
+  // ─── Layout mode switch ────────────────────────────
+  // When the reading mode flips (scroll ↔ single), reposition onto the
+  // current page's slot start. Runs after commit — the flex direction
+  // has already switched, so the slot rects are the new layout's. The
+  // initial mount is skipped: document opens are positioned by the
+  // _scrollTarget effect above instead.
+  const layoutModeRef = useRef(layoutMode)
+  useEffect(() => {
+    const prev = layoutModeRef.current
+    layoutModeRef.current = layoutMode
+    if (prev === layoutMode) return
+    const container = containerRef.current
+    if (!container) return
+    const page = usePdfStore.getState().activePage
+    const slot = pageRefs.current.get(page)
+    if (!slot) return
+    const cr = container.getBoundingClientRect()
+    const r = slot.getBoundingClientRect()
+    if (layoutMode === 'single') {
+      container.scrollLeft = r.left - cr.left + container.scrollLeft
+      container.scrollTop = r.top - cr.top + container.scrollTop
+    } else {
+      container.scrollTop = r.top - cr.top + container.scrollTop
+      container.scrollLeft = Math.max(0, (container.scrollWidth - container.clientWidth) / 2)
+    }
+  }, [layoutMode])
 
   // ─── Rotation with reading-position preservation ───
   // Before rotating, capture the PDF-space point at the viewport center
@@ -515,6 +683,19 @@ export default function ReaderViewport() {
   }, [rotation, effectiveZoom, visiblePages, pdfDoc])
 
   // ─── Empty state ───
+  // Diagnostic: log main's geometry on each render — confirms whether
+  // the flex parent is giving the scroll container a usable height.
+  if (typeof window !== 'undefined' && !(window as any).__rvDiag) {
+    ;(window as any).__rvDiag = setInterval(() => {
+      const el = containerRef.current
+      const parent = el?.parentElement
+      if (!el || !parent) return
+      const ps = getComputedStyle(parent)
+      console.log('[RV-diag] main:', el.offsetHeight, 'clientH:', el.clientHeight, 'scrollH:', el.scrollHeight,
+        '| parent:', parent.offsetHeight, 'flex:', ps.flex, 'minH:', ps.minHeight)
+    }, 2000)
+  }
+
   if (!pdfDoc || loading) {
     return (
       <main className={`flex flex-1 items-center justify-center bg-[var(--bg)] ${focusMode ? 'absolute inset-0 z-50' : ''}`}>
@@ -544,7 +725,9 @@ export default function ReaderViewport() {
   return (
     <main
       ref={containerRef}
-      className={`flex-1 overflow-auto bg-[var(--bg)] ${focusMode ? 'absolute inset-0 z-50' : ''}`}
+      className={`reader-scroll-container relative min-h-0 flex-1 overflow-auto bg-[var(--bg)] ${focusMode ? 'absolute inset-0 z-50' : ''} ${
+        layoutMode === 'single' ? 'snap-x snap-proximity [overflow-anchor:none]' : ''
+      }`}
       onScroll={handleScroll}
       onWheel={handleWheel}
     >
@@ -565,16 +748,36 @@ export default function ReaderViewport() {
 
       <SearchBar />
 
-      <div className="flex flex-col items-center py-6">
+      {/* Reading progress — absolute over the PDF viewport's bottom
+       *  edge (single mode) or right edge (scroll mode). Being a child
+       *  of the scroll container means it scrolls WITH the content, not
+       *  with the page; using 'fixed' would keep it pinned at the
+       *  viewport edge regardless of scroll position. */}
+      <ReadingProgressBar />
+
+      <div className={layoutMode === 'single'
+        ? 'flex min-h-full flex-row items-center gap-6 py-6'
+        : 'flex flex-col items-center gap-6 py-6'}>
         {pages.map((pageNum) => {
           const height = pageHeights.get(pageNum)
+          const width = layoutMode === 'single' ? pageWidths.get(pageNum) : undefined
           return (
             <div
               key={pageNum}
               ref={(el) => { if (el) pageRefs.current.set(pageNum, el); else pageRefs.current.delete(pageNum) }}
               data-page-number={pageNum}
-              style={height ? { minHeight: height } : undefined}
-              className="flex w-full items-center justify-start"
+              style={{
+                minHeight: height,
+                // Horizontal slot: at least the reader width, wider when
+                // the page is zoomed past fit-width (CSS max() tracks the
+                // container width on resize without JS).
+                ...(layoutMode === 'single'
+                  ? { width: width ? `max(100%, ${width}px)` : '100%' }
+                  : {}),
+              }}
+              className={layoutMode === 'single'
+                ? 'flex snap-start items-center justify-start'
+                : 'flex w-full items-center justify-start'}
             >
               {visiblePages.has(pageNum) ? (
                 <PdfPageLazy
@@ -583,7 +786,10 @@ export default function ReaderViewport() {
                   zoom={effectiveZoom}
                   rotation={rotation}
                   documentId={activeDocId}
-                  onHeight={(h) => setPageHeights((prev) => new Map(prev).set(pageNum, h))}
+                  onSize={(w, h) => {
+                    setPageHeights((prev) => new Map(prev).set(pageNum, h))
+                    setPageWidths((prev) => new Map(prev).set(pageNum, w))
+                  }}
                 />
               ) : (
                 <div style={{ height: height || 800, width: '100%' }} />
@@ -598,14 +804,14 @@ export default function ReaderViewport() {
 
 // ─── Memoized per-page loader ───
 const PdfPageLazy = memo(function PdfPageLazy({
-  pageNum, pdfDoc, zoom, rotation, documentId, onHeight,
+  pageNum, pdfDoc, zoom, rotation, documentId, onSize,
 }: {
   pageNum: number
   pdfDoc: PDFDocumentProxy
   zoom: number
   rotation: number
   documentId: string | null
-  onHeight: (h: number) => void
+  onSize: (w: number, h: number) => void
 }) {
   const [pageProxy, setPageProxy] = useState<Awaited<ReturnType<typeof pdfDoc.getPage>> | null>(null)
 
@@ -616,7 +822,7 @@ const PdfPageLazy = memo(function PdfPageLazy({
       if (cancelled) { page.cleanup(); return }
       setPageProxy(page)
       const vp = page.getViewport({ scale: zoom, rotation })
-      onHeight(vp.height)
+      onSize(vp.width, vp.height)
     })
     return () => { cancelled = true }
   }, [pageNum, pdfDoc, zoom, rotation])

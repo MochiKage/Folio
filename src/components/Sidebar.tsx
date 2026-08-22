@@ -1,6 +1,7 @@
 import { useRef } from 'react'
 import { useAppStore, type SidebarTab } from '../stores/appStore'
 import OutlinePanel from './OutlinePanel'
+import ThumbnailsPanel from './ThumbnailsPanel'
 import BookmarksPanel from './BookmarksPanel'
 import AnnotationsPanel from './AnnotationsPanel'
 import VocabularyPanel from './VocabularyPanel'
@@ -53,6 +54,7 @@ export default function Sidebar() {
 function SidebarPanel({ tab }: { tab: SidebarTab | null }) {
   switch (tab) {
     case 'outline':      return <OutlinePanel />
+    case 'thumbnails':   return <ThumbnailsPanel />
     case 'bookmarks':    return <BookmarksPanel />
     case 'annotations':  return <AnnotationsPanel />
     case 'vocabulary':   return <VocabularyPanel />

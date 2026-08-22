@@ -1,6 +1,6 @@
 import {
   Sun, Moon, BookOpen, Sidebar, Maximize2, Minimize2,
-  ListTree, Bookmark, Highlighter, BookOpenText, LibraryBig,
+  LayoutGrid, ListTree, Bookmark, Highlighter, BookOpenText, LibraryBig,
   Globe, Search,
 } from 'lucide-react'
 import { useAppStore, type Theme, type SidebarTab } from '../stores/appStore'
@@ -9,6 +9,7 @@ const themeIcons = { light: Sun, dark: Moon, parchment: BookOpen } as const
 const themeLabels = { light: 'Light', dark: 'Dark', parchment: 'Warm' } as const
 
 const tabs: { id: SidebarTab; label: string; icon: typeof ListTree }[] = [
+  { id: 'thumbnails', label: 'Pages', icon: LayoutGrid },
   { id: 'outline', label: 'Outline', icon: ListTree },
   { id: 'bookmarks', label: 'Bookmarks', icon: Bookmark },
   { id: 'annotations', label: 'Annotations', icon: Highlighter },

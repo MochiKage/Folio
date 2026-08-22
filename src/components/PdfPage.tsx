@@ -374,7 +374,7 @@ const PdfPage = memo(function PdfPage({
   }, [renderPage])
 
   return (
-    <div className="pdf-page relative mb-4 shadow-lg" data-page-number={pageNumber}>
+    <div className="pdf-page relative" data-page-number={pageNumber}>
       <canvas ref={canvasRef} className="block" />
       {documentId && (
         <AnnotationOverlay

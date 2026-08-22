@@ -21,6 +21,8 @@ const ocrStatusLabels: Record<string, string> = {
 
 export default function StatusBar() {
   const { focusMode } = useAppStore()
+  const layoutMode = useAppStore((s) => s.layoutMode)
+  const setLayoutMode = useAppStore((s) => s.setLayoutMode)
   const activePage = usePdfStore((s) => s.activePage)
   const zoom = usePdfStore((s) => s.zoom)
   const setZoom = usePdfStore((s) => s.setZoom)
@@ -98,12 +100,26 @@ export default function StatusBar() {
             ↻ {rotation}°
           </button>
         )}
+        {/* Reading mode toggle — continuous scroll ↔ single-page swipe */}
+        {activeDoc && (
+          <button
+            onClick={() => setLayoutMode(layoutMode === 'single' ? 'scroll' : 'single')}
+            className={`rounded px-1.5 py-0.5 text-[10px] transition-colors ${
+              layoutMode === 'single'
+                ? 'bg-[var(--color-accent)]/10 font-medium text-[var(--color-accent)]'
+                : 'text-[var(--text)]/30 hover:bg-[var(--border)]/30 hover:text-[var(--text)]/70'
+            }`}
+            title="切换翻页方式：连续滚动 / 单页左右滑动（←/→ 键翻页）"
+          >
+            {layoutMode === 'single' ? '⇔ 滚动' : '⇌ 单页'}
+          </button>
+        )}
       </div>
 
       {/* Zoom slider bar */}
       <div className="flex items-center gap-2">
         <span className="w-16 text-right tabular-nums text-[var(--text)]/40">
-          Page {activePage}/{totalPages || '—'}
+          {activePage}/{totalPages || '—'}
         </span>
         <span className="text-[var(--border)]">|</span>
 

@@ -48,6 +48,9 @@ export const usePdfStore = create<PdfState>((set, get) => ({
       activeDocId: doc.id,
       activePage: doc.currentPage,
       zoom: doc.zoom,
+      // Restore the reading position — ReaderViewport scrolls to this
+      // page once the document is rendered (library opens pass last_page).
+      _scrollTarget: doc.currentPage,
     })),
 
   removeDocument: (id) =>

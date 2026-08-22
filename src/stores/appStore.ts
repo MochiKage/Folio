@@ -1,8 +1,8 @@
 import { create } from 'zustand'
 
 export type Theme = 'light' | 'dark' | 'parchment'
-export type SidebarTab = 'outline' | 'bookmarks' | 'annotations' | 'vocabulary' | 'library' | 'dictionary' | 'search'
-export type LayoutMode = 'single' | 'scroll' | 'spread' | 'fit-width' | 'fit-height'
+export type SidebarTab = 'outline' | 'thumbnails' | 'bookmarks' | 'annotations' | 'vocabulary' | 'library' | 'dictionary' | 'search'
+export type LayoutMode = 'scroll' | 'single'
 
 interface AppState {
   // Theme
@@ -60,8 +60,15 @@ export const useAppStore = create<AppState>((set) => ({
     })),
 
   // Layout
-  layoutMode: 'fit-width',
-  setLayoutMode: (mode) => set({ layoutMode: mode }),
+  // Persisted across sessions — remember the user's preferred reading mode
+  layoutMode: (() => {
+    const v = localStorage.getItem('folio.layoutMode')
+    return v === 'single' ? 'single' : 'scroll'
+  })(),
+  setLayoutMode: (mode) => {
+    localStorage.setItem('folio.layoutMode', mode)
+    set({ layoutMode: mode })
+  },
 
   // Focus mode
   focusMode: false,
